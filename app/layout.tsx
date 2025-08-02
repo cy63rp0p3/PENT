@@ -3,6 +3,7 @@ import { GeistSans } from 'geist/font/sans'
 import { GeistMono } from 'geist/font/mono'
 import './globals.css'
 import { BackgroundScansProvider } from '@/hooks/useBackgroundScans'
+import { ReportPromptProvider } from '@/components/report-prompt-provider'
 
 export const metadata: Metadata = {
   title: 'PEN-T',
@@ -29,7 +30,9 @@ html {
       </head>
       <body>
         <BackgroundScansProvider>
-          {children}
+          <ReportPromptProvider>
+            {children}
+          </ReportPromptProvider>
         </BackgroundScansProvider>
       </body>
     </html>

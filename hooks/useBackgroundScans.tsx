@@ -5,7 +5,7 @@ import { createContext, useContext, useState, useEffect, ReactNode } from 'react
 interface ScanState {
   scanId: string
   target: string
-  scanType: 'whois' | 'dns' | 'subdomain' | 'port_scan' | 'vulnerability_scan'
+  scanType: 'whois' | 'dns' | 'subdomain' | 'port_scan' | 'vulnerability_scan' | 'comprehensive_scan'
   toolType?: string
   scan_type?: string
   progress: number
@@ -13,6 +13,7 @@ interface ScanState {
   startTime: number
   results?: any
   error?: string
+  reportPromptShown?: boolean
 }
 
 interface BackgroundScansContextType {
@@ -44,7 +45,38 @@ export function BackgroundScansProvider({ children }: { children: ReactNode }) {
 
   // Save scans to localStorage whenever they change
   useEffect(() => {
-    localStorage.setItem('backgroundScans', JSON.stringify(activeScans))
+    try {
+      // Clean up old scans to prevent localStorage quota issues
+      const cleanedScans = activeScans.filter(scan => {
+        // Keep only scans from the last 24 hours
+        const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000)
+        return scan.startTime > oneDayAgo
+      })
+      
+      // Limit to maximum 50 scans to prevent quota issues
+      const limitedScans = cleanedScans.slice(-50)
+      
+      const dataToStore = JSON.stringify(limitedScans)
+      
+      // Check if data size is reasonable (under 4MB to be safe)
+      if (dataToStore.length > 4 * 1024 * 1024) {
+        console.warn('Background scans data too large, keeping only recent scans')
+        // Keep only the 10 most recent scans
+        const recentScans = cleanedScans.slice(-10)
+        localStorage.setItem('backgroundScans', JSON.stringify(recentScans))
+      } else {
+        localStorage.setItem('backgroundScans', dataToStore)
+      }
+    } catch (error) {
+      console.error('Failed to save background scans to localStorage:', error)
+      // If localStorage is full, clear it and save only current scans
+      try {
+        localStorage.clear()
+        localStorage.setItem('backgroundScans', JSON.stringify(activeScans.slice(-5)))
+      } catch (clearError) {
+        console.error('Failed to clear localStorage:', clearError)
+      }
+    }
   }, [activeScans])
 
   // Poll for scan progress in background
@@ -62,20 +94,46 @@ export function BackgroundScansProvider({ children }: { children: ReactNode }) {
           let endpoint = ''
           if (['whois', 'dns', 'subdomain'].includes(scan.scanType)) {
             endpoint = `http://localhost:8000/api/recon/progress/${scan.scanId}/`
-          } else if (['port_scan', 'vulnerability_scan'].includes(scan.scanType)) {
-            endpoint = `http://localhost:8000/api/recon/progress/${scan.scanId}/`
+          } else if (scan.scanType === 'port_scan') {
+            endpoint = `http://localhost:8000/api/scan/nmap/status/${scan.scanId}/`
+          } else if (scan.scanType === 'vulnerability_scan') {
+            endpoint = `http://localhost:8000/api/scan/zap/status/${scan.scanId}/`
+          } else if (scan.scanType === 'comprehensive_scan') {
+            endpoint = `http://localhost:8000/api/scan/comprehensive/status/${scan.scanId}/`
           }
           
           if (endpoint) {
             const response = await fetch(endpoint)
             const data = await response.json()
             
-            console.log(`Scan ${scan.scanId} progress:`, data.progress)
+            console.log(`Scan ${scan.scanId} progress:`, data)
             
-            if (data.progress >= 100) {
-              updateScanProgress(scan.scanId, 100, data.result)
+            // Handle different response formats
+            if (scan.scanType === 'port_scan') {
+              // Nmap scan response format
+              if (data.status === 'completed' && data.results) {
+                updateScanProgress(scan.scanId, 100, data.results)
+              } else if (data.status === 'failed') {
+                updateScanProgress(scan.scanId, 0, undefined, data.error || 'Scan failed')
+              } else if (data.progress !== undefined) {
+                updateScanProgress(scan.scanId, data.progress)
+              }
+            } else if (scan.scanType === 'vulnerability_scan') {
+              // Vulnerability scan response format
+              if (data.status === 'completed' && data.results) {
+                updateScanProgress(scan.scanId, 100, data.results)
+              } else if (data.status === 'failed') {
+                updateScanProgress(scan.scanId, 0, undefined, data.error || 'Scan failed')
+              } else if (data.progress !== undefined) {
+                updateScanProgress(scan.scanId, data.progress)
+              }
             } else {
-              updateScanProgress(scan.scanId, data.progress)
+              // Other scan types response format
+              if (data.progress >= 100) {
+                updateScanProgress(scan.scanId, 100, data.result)
+              } else {
+                updateScanProgress(scan.scanId, data.progress)
+              }
             }
           }
         } catch (error) {
@@ -120,7 +178,21 @@ export function BackgroundScansProvider({ children }: { children: ReactNode }) {
 
   const cancelScan = async (scanId: string) => {
     try {
-      await fetch(`http://localhost:8000/api/recon/cancel/${scanId}/`, { method: 'POST' })
+      // Use different cancel endpoints based on scan type
+      const scan = activeScans.find(s => s.scanId === scanId)
+      let endpoint = ''
+      
+      if (scan?.scanType === 'port_scan') {
+        endpoint = `http://localhost:8000/api/scan/nmap/cancel/${scanId}/`
+      } else if (scan?.scanType === 'vulnerability_scan') {
+        endpoint = `http://localhost:8000/api/scan/zap/cancel/${scanId}/`
+      } else if (scan?.scanType === 'comprehensive_scan') {
+        endpoint = `http://localhost:8000/api/scan/comprehensive/cancel/${scanId}/`
+      } else {
+        endpoint = `http://localhost:8000/api/recon/cancel/${scanId}/`
+      }
+      
+      await fetch(endpoint, { method: 'POST' })
       setActiveScans(prev => prev.map(scan => 
         scan.scanId === scanId ? { ...scan, status: 'cancelled' } : scan
       ))

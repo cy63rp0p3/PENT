@@ -3,6 +3,9 @@
 import { useState, useEffect } from "react"
 import { useBackgroundScans } from "@/hooks/useBackgroundScans"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import NmapDetection from "@/components/nmap-detection"
+import BasicPortScanner from "@/components/basic-port-scanner"
+import { useReportPromptContext } from "@/components/report-prompt-provider"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -81,71 +84,20 @@ interface OptionPreset {
   icon: string
 }
 
-// Pre-configured option presets organized by scan mode
+// Simplified scan presets for basic scans
 const SCAN_PRESETS = {
   port: [
     {
-      name: "Quick Scan",
-      description: "Fast port scan with basic service detection",
-      icon: "⚡",
-      options: {
-        portRange: "1-1000",
-        scanSpeed: "fast",
-        serviceDetection: true,
-        osDetection: false,
-        scriptScan: false,
-        aggressive: false,
-        zapScanType: "spider",
-        zapScanLevel: "low",
-        zapIncludeContext: false,
-        zapCustomHeaders: ""
-      }
-    },
-    {
-      name: "Full Port Scan",
-      description: "Complete port range with service detection",
+      name: "Basic Port Scan",
+      description: "Standard port scan with service and OS detection",
       icon: "🔍",
       options: {
-        portRange: "1-65535",
+        portRange: "1-1000",
         scanSpeed: "normal",
         serviceDetection: true,
         osDetection: true,
-        scriptScan: true,
-        aggressive: false,
-        zapScanType: "spider",
-        zapScanLevel: "low",
-        zapIncludeContext: false,
-        zapCustomHeaders: ""
-      }
-    },
-    {
-      name: "Stealth Scan",
-      description: "Low-profile scan to avoid detection",
-      icon: "🕵️",
-      options: {
-        portRange: "1-1000",
-        scanSpeed: "slow",
-        serviceDetection: false,
-        osDetection: false,
         scriptScan: false,
         aggressive: false,
-        zapScanType: "spider",
-        zapScanLevel: "low",
-        zapIncludeContext: false,
-        zapCustomHeaders: ""
-      }
-    },
-    {
-      name: "Aggressive Scan",
-      description: "Intensive scan with maximum detection",
-      icon: "💥",
-      options: {
-        portRange: "1-65535",
-        scanSpeed: "aggressive",
-        serviceDetection: true,
-        osDetection: true,
-        scriptScan: true,
-        aggressive: true,
         zapScanType: "spider",
         zapScanLevel: "low",
         zapIncludeContext: false,
@@ -155,69 +107,18 @@ const SCAN_PRESETS = {
   ],
   vulnerability: [
     {
-      name: "Basic Vulnerability Scan",
-      description: "Standard web application vulnerability scan",
+      name: "Full Vulnerability Scan",
+      description: "Comprehensive vulnerability assessment with ZAP",
       icon: "🛡️",
       options: {
-        portRange: "80,443,8080,8443",
+        portRange: "1-1000",
         scanSpeed: "normal",
         serviceDetection: true,
         osDetection: false,
         scriptScan: false,
         aggressive: false,
-        zapScanType: "spider",
-        zapScanLevel: "low",
-        zapIncludeContext: false,
-        zapCustomHeaders: ""
-      }
-    },
-    {
-      name: "Comprehensive Vulnerability Scan",
-      description: "Full vulnerability assessment with active scanning",
-      icon: "🔍",
-      options: {
-        portRange: "80,443,8080,8443",
-        scanSpeed: "normal",
-        serviceDetection: true,
-        osDetection: false,
-        scriptScan: true,
-        aggressive: false,
         zapScanType: "active",
         zapScanLevel: "medium",
-        zapIncludeContext: true,
-        zapCustomHeaders: ""
-      }
-    },
-    {
-      name: "Web Application Scan",
-      description: "Specialized scan for web applications",
-      icon: "🌐",
-      options: {
-        portRange: "80,443,8080,8443",
-        scanSpeed: "normal",
-        serviceDetection: true,
-        osDetection: false,
-        scriptScan: true,
-        aggressive: false,
-        zapScanType: "active",
-        zapScanLevel: "medium",
-        zapIncludeContext: true,
-        zapCustomHeaders: "User-Agent: Mozilla/5.0 (compatible; PEN-T Scanner)"
-      }
-    },
-    {
-      name: "High-Intensity Scan",
-      description: "Maximum vulnerability detection",
-      icon: "💥",
-      options: {
-        portRange: "80,443,8080,8443",
-        scanSpeed: "fast",
-        serviceDetection: true,
-        osDetection: false,
-        scriptScan: true,
-        aggressive: true,
-        zapScanType: "active",
-        zapScanLevel: "high",
         zapIncludeContext: true,
         zapCustomHeaders: ""
       }
@@ -225,52 +126,18 @@ const SCAN_PRESETS = {
   ],
   comprehensive: [
     {
-      name: "Full Assessment",
-      description: "Complete port and vulnerability assessment",
-      icon: "🔍",
+      name: "Full Security Assessment",
+      description: "Complete port scan + vulnerability assessment",
+      icon: "🎯",
       options: {
-        portRange: "1-65535",
+        portRange: "1-1000",
         scanSpeed: "normal",
         serviceDetection: true,
         osDetection: true,
-        scriptScan: true,
+        scriptScan: false,
         aggressive: false,
         zapScanType: "active",
         zapScanLevel: "medium",
-        zapIncludeContext: true,
-        zapCustomHeaders: ""
-      }
-    },
-    {
-      name: "Stealth Assessment",
-      description: "Low-profile comprehensive scan",
-      icon: "🕵️",
-      options: {
-        portRange: "1-1000",
-        scanSpeed: "slow",
-        serviceDetection: true,
-        osDetection: false,
-        scriptScan: false,
-        aggressive: false,
-        zapScanType: "passive",
-        zapScanLevel: "low",
-        zapIncludeContext: false,
-        zapCustomHeaders: ""
-      }
-    },
-    {
-      name: "Aggressive Assessment",
-      description: "Maximum detection comprehensive scan",
-      icon: "💥",
-      options: {
-        portRange: "1-65535",
-        scanSpeed: "aggressive",
-        serviceDetection: true,
-        osDetection: true,
-        scriptScan: true,
-        aggressive: true,
-        zapScanType: "active",
-        zapScanLevel: "high",
         zapIncludeContext: true,
         zapCustomHeaders: ""
       }
@@ -306,8 +173,8 @@ const validatePortRange = (portRange: string): { isValid: boolean; error?: strin
     return { isValid: false, error: "No valid ports in range" }
   }
   
-  if (ports.length > 10000) {
-    return { isValid: false, error: "Port range too large (max 10,000 ports)" }
+  if (ports.length > 65535) {
+    return { isValid: false, error: "Port range too large (max 65,535 ports)" }
   }
   
   return { isValid: true }
@@ -331,7 +198,8 @@ const validateTarget = (target: string): { isValid: boolean; error?: string } =>
 }
 
 export default function ScanningPage() {
-  const { startScan: startBackgroundScan, activeScans, cancelScan: cancelBackgroundScan } = useBackgroundScans()
+  const { startScan: startBackgroundScan, activeScans, cancelScan: cancelBackgroundScan, removeScan } = useBackgroundScans()
+  const { showReportPrompt } = useReportPromptContext()
   const [target, setTarget] = useState("")
 
   const [scanMode, setScanMode] = useState<"port" | "vulnerability" | "comprehensive">("port")
@@ -343,6 +211,10 @@ export default function ScanningPage() {
   const [scanHistory, setScanHistory] = useState<ScanResult[]>([])
   const [selectedScan, setSelectedScan] = useState<ScanResult | null>(null)
   const [selectedPreset, setSelectedPreset] = useState<string>("")
+  const [useBasicScanner, setUseBasicScanner] = useState(false)
+  const [nmapAvailable, setNmapAvailable] = useState(false)
+  const [showResults, setShowResults] = useState(false)
+  const [reportPromptShown, setReportPromptShown] = useState<{[key: string]: boolean}>({})
   // Default options
   const defaultOptions: AdvancedOptions = {
     portRange: "1-1000",
@@ -397,8 +269,34 @@ export default function ScanningPage() {
 
   // Save data to localStorage
   useEffect(() => {
-    localStorage.setItem('scanHistory', JSON.stringify(scanHistory))
-  }, [scanHistory])
+    try {
+      // Limit scan history to prevent localStorage quota issues
+      const limitedHistory = scanHistory.slice(-20) // Keep only last 20 scans
+      
+      const dataToStore = JSON.stringify(limitedHistory)
+      
+      // Check if data size is reasonable (under 4MB to be safe)
+      if (dataToStore.length > 4 * 1024 * 1024) {
+        console.warn('Scan history too large, keeping only recent scans')
+        // Keep only the 5 most recent scans
+        const recentHistory = scanHistory.slice(-5)
+        localStorage.setItem('scanHistory', JSON.stringify(recentHistory))
+      } else {
+        localStorage.setItem('scanHistory', dataToStore)
+      }
+    } catch (error) {
+      console.error('Failed to save scan history to localStorage:', error)
+      // If localStorage is full, clear scan history and save only current scan
+      try {
+        localStorage.removeItem('scanHistory')
+        if (selectedScan) {
+          localStorage.setItem('scanHistory', JSON.stringify([selectedScan]))
+        }
+      } catch (clearError) {
+        console.error('Failed to clear scan history from localStorage:', clearError)
+      }
+    }
+  }, [scanHistory, selectedScan])
 
   useEffect(() => {
     localStorage.setItem('scanAdvancedOptions', JSON.stringify(advancedOptions))
@@ -433,6 +331,69 @@ export default function ScanningPage() {
     setSelectedPreset("")
     setValidationErrors({})
     setError("")
+  }
+
+  // Clear all localStorage data
+  const clearAllData = () => {
+    try {
+      localStorage.removeItem('scanHistory')
+      localStorage.removeItem('scanAdvancedOptions')
+      localStorage.removeItem('scanSelectedPreset')
+      localStorage.removeItem('backgroundScans')
+      setScanHistory([])
+      setSelectedScan(null)
+      setAdvancedOptions(defaultOptions)
+      setSelectedPreset("")
+      console.log('All scan data cleared from localStorage')
+    } catch (error) {
+      console.error('Failed to clear data:', error)
+    }
+  }
+
+  const handleUseBasicScanner = () => {
+    setUseBasicScanner(true)
+  }
+
+  const handleNmapAvailable = () => {
+    setNmapAvailable(true)
+    setUseBasicScanner(false)
+  }
+
+  const handleBasicScanComplete = (results: any) => {
+    const scanResult: ScanResult = {
+      id: `basic_scan_${Date.now()}`,
+      type: 'port_scan',
+      target: results.target,
+      scan_type: 'basic_port_scan',
+      status: 'completed',
+      progress: 100,
+      start_time: new Date().toISOString(),
+      end_time: new Date().toISOString(),
+      results: results,
+      summary: results.summary
+    }
+    
+    setCurrentScan(scanResult)
+    setScanHistory(prev => [scanResult, ...prev])
+    setShowResults(true)
+    
+    // Switch back to main scanning interface to show results
+    setUseBasicScanner(false)
+    
+    // Show report prompt after scan completion
+    setTimeout(() => {
+      if (!reportPromptShown[scanResult.id]) {
+        setReportPromptShown(prev => ({ ...prev, [scanResult.id]: true }))
+        showReportPrompt({
+          scan_type: scanResult.scan_type,
+          target: scanResult.target,
+          results: scanResult.results,
+          scan_id: scanResult.id,
+          timestamp: scanResult.start_time,
+          status: scanResult.status
+        })
+      }
+    }, 1000) // Small delay to ensure UI is updated
   }
 
   // Validate all inputs
@@ -493,7 +454,17 @@ export default function ScanningPage() {
 
     const interval = setInterval(async () => {
       try {
-        const response = await fetch(`http://localhost:8000/api/recon/progress/${currentScan.id}/`)
+        // Use the correct endpoint based on scan type
+        let endpoint = ''
+        if (currentScan.type === 'port_scan') {
+          endpoint = `http://localhost:8000/api/scan/nmap/status/${currentScan.id}/`
+        } else if (currentScan.type === 'vulnerability_scan') {
+          endpoint = `http://localhost:8000/api/scan/zap/status/${currentScan.id}/`
+        } else {
+          endpoint = `http://localhost:8000/api/recon/progress/${currentScan.id}/`
+        }
+        
+        const response = await fetch(endpoint)
         const data = await response.json()
         
         if (data.progress !== undefined) {
@@ -501,19 +472,52 @@ export default function ScanningPage() {
           setCurrentScan(prev => prev ? { ...prev, progress: data.progress } : null)
         }
         
-        if (data.result) {
+        // Handle completed scan
+        if (data.status === 'completed' && data.results) {
           const completedScan = {
             ...currentScan,
             status: "completed" as const,
             progress: 100,
             end_time: new Date().toISOString(),
-            results: data.result,
-            summary: generateSummary(data.result)
+            results: data.results,
+            summary: generateSummary(data.results)
           }
           
           setCurrentScan(null)
           setSelectedScan(completedScan)
           setScanHistory(prev => [completedScan, ...prev])
+          setLoading(false)
+          clearInterval(interval)
+          
+          // Show report prompt after scan completion
+          setTimeout(() => {
+            if (!reportPromptShown[completedScan.id]) {
+              setReportPromptShown(prev => ({ ...prev, [completedScan.id]: true }))
+              showReportPrompt({
+                scan_type: completedScan.scan_type,
+                target: completedScan.target,
+                results: completedScan.results,
+                scan_id: completedScan.id,
+                timestamp: completedScan.start_time,
+                status: completedScan.status
+              })
+            }
+          }, 1000) // Small delay to ensure UI is updated
+        }
+        
+        // Handle failed scan
+        if (data.status === 'failed') {
+          const failedScan = {
+            ...currentScan,
+            status: "failed" as const,
+            progress: 0,
+            end_time: new Date().toISOString(),
+            error: data.error || 'Scan failed'
+          }
+          
+          setCurrentScan(null)
+          setSelectedScan(failedScan)
+          setScanHistory(prev => [failedScan, ...prev])
           setLoading(false)
           clearInterval(interval)
         }
@@ -528,7 +532,6 @@ export default function ScanningPage() {
   const generateSummary = (results: any) => {
     if (results.type === "port_scan") {
       return {
-        total_ports: results.total_ports,
         open_ports: results.open_ports,
         services: results.services,
         os_info: results.os_info
@@ -550,6 +553,43 @@ export default function ScanningPage() {
     setError("")
     setValidationErrors({})
     
+    // Prevent multiple rapid clicks
+    if (loading) {
+      return
+    }
+    
+    // Check if Nmap is available for advanced scanning
+    if (!nmapAvailable) {
+      setError("Nmap is not available. Click 'Use Basic Scanner Instead' below to scan ports without Nmap, or install Nmap for advanced features.")
+      return
+    }
+
+    // Set loading state early
+    setLoading(true)
+
+    // Additional safety check - verify Nmap is actually available before proceeding
+    try {
+      const response = await fetch('http://localhost:8000/api/scan/check-nmap/', {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      
+      const data = await response.json()
+      
+      if (!data.success || !data.available) {
+        setError("Nmap verification failed. Click 'Use Basic Scanner Instead' below to scan ports without Nmap, or install Nmap for advanced features.")
+        setNmapAvailable(false)
+        setLoading(false)
+        return
+      }
+    } catch (error) {
+      console.error('Error verifying Nmap availability:', error)
+      setError("Unable to verify Nmap availability. Click 'Use Basic Scanner Instead' below to scan ports without Nmap, or install Nmap for advanced features.")
+      setNmapAvailable(false)
+      setLoading(false)
+      return
+    }
+    
     // Validate inputs
     if (!validateInputs()) {
       setError("Please fix the validation errors before starting the scan")
@@ -557,31 +597,45 @@ export default function ScanningPage() {
     }
 
     const scanId = `scan_${Date.now()}`
-    const scanTypeValue = scanMode === "port" ? "port_scan" : "vulnerability_scan"
-    const scanTypeConfig = scanMode === "port" ? "quick" : "basic"
+    let scanTypeValue: 'port_scan' | 'vulnerability_scan' | 'comprehensive_scan'
+    let scanTypeConfig: string
+    let endpoint: string
+
+    if (scanMode === "port") {
+      scanTypeValue = "port_scan"
+      scanTypeConfig = "basic"
+      endpoint = "port"
+    } else if (scanMode === "vulnerability") {
+      scanTypeValue = "vulnerability_scan"
+      scanTypeConfig = "full"
+      endpoint = "vulnerability"
+    } else {
+      // Comprehensive scan
+      scanTypeValue = "comprehensive_scan"
+      scanTypeConfig = "full"
+      endpoint = "comprehensive"
+    }
 
     // Start scan in background context
     startBackgroundScan({
       scanId: scanId,
       target: target,
-      scanType: scanTypeValue as 'port_scan' | 'vulnerability_scan',
+      scanType: scanTypeValue,
       scan_type: scanTypeConfig
     })
 
     setCurrentScan({
       id: scanId,
-      type: scanTypeValue as 'port_scan' | 'vulnerability_scan',
+      type: scanTypeValue,
       target: target,
       scan_type: scanTypeConfig,
       status: "running",
       progress: 0,
       start_time: new Date().toISOString()
     })
-    setLoading(true)
     setProgress(0)
 
     try {
-      const endpoint = scanMode === "port" ? "port" : "vulnerability"
       const response = await fetch(`http://localhost:8000/api/scan/${endpoint}/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -595,7 +649,19 @@ export default function ScanningPage() {
       const data = await response.json()
 
       if (data.scan_id) {
-        setCurrentScan(prev => prev ? { ...prev, id: data.scan_id } : null)
+        // Update the scan ID in both currentScan and background scans
+        const updatedScanId = data.scan_id
+        setCurrentScan(prev => prev ? { ...prev, id: updatedScanId } : null)
+        
+        // Update the background scan with the correct scan ID
+        removeScan(scanId)
+        startBackgroundScan({
+          scanId: updatedScanId,
+          target: target,
+          scanType: scanTypeValue,
+          scan_type: scanTypeConfig
+        })
+        
         console.log(`${scanMode} scan started:`, data)
       } else {
         throw new Error(data.error || `Failed to start ${scanMode} scan`)
@@ -672,6 +738,15 @@ export default function ScanningPage() {
         </div>
       </div>
 
+      {/* Nmap Detection and Basic Scanner */}
+      {useBasicScanner ? (
+        <BasicPortScanner onScanComplete={handleBasicScanComplete} />
+      ) : (
+        <NmapDetection
+          onUseBasicScanner={handleUseBasicScanner}
+          onNmapAvailable={handleNmapAvailable}
+        >
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Unified Scan Configuration Panel */}
         <div className="lg:col-span-1 space-y-6">
@@ -681,12 +756,30 @@ export default function ScanningPage() {
               <CardTitle className="flex items-center gap-2 text-foreground">
                 <Target className="h-5 w-5 text-blue-400" />
                 Scan Configuration
+                {!nmapAvailable && (
+                  <Badge variant="outline" className="text-orange-600 border-orange-600 text-xs">
+                    Basic Mode
+                  </Badge>
+                )}
               </CardTitle>
               <CardDescription className="text-muted-foreground">
-                Configure target and scanning parameters
+                {nmapAvailable 
+                  ? "Configure target and scanning parameters" 
+                  : "Basic scanning mode - Nmap not available"
+                }
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
+              {/* Nmap Status Warning */}
+              {!nmapAvailable && (
+                <Alert className="border-orange-500 bg-orange-50 dark:bg-orange-900/20">
+                  <AlertTriangle className="h-4 w-4 text-orange-500" />
+                  <AlertDescription className="text-orange-700 dark:text-orange-300">
+                    Nmap is not available. Advanced scanning features are disabled. Use the basic scanner for quick port detection.
+                  </AlertDescription>
+                </Alert>
+              )}
+              
               {/* Target Configuration Section */}
               <div className="space-y-4">
                 
@@ -1059,7 +1152,7 @@ export default function ScanningPage() {
 
                 <Button
                   onClick={startScan}
-                  disabled={!target || loading}
+                  disabled={!target || loading || !nmapAvailable}
                   className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700"
                   size="lg"
                 >
@@ -1068,7 +1161,10 @@ export default function ScanningPage() {
                   ) : (
                     <Play className="h-4 w-4 mr-2" />
                   )}
-                  Start {scanMode === "port" ? "Port" : scanMode === "vulnerability" ? "Vulnerability" : "Comprehensive"} Scan
+                  {!nmapAvailable 
+                    ? "Nmap Not Available" 
+                    : `Start ${scanMode === "port" ? "Port" : scanMode === "vulnerability" ? "Vulnerability" : "Comprehensive"} Scan`
+                  }
                 </Button>
 
                 {loading && (
@@ -1079,6 +1175,17 @@ export default function ScanningPage() {
                   >
                     <Square className="h-4 w-4 mr-2" />
                     Cancel Scan
+                  </Button>
+                )}
+
+                {!nmapAvailable && !loading && (
+                  <Button
+                    onClick={handleUseBasicScanner}
+                    variant="outline"
+                    className="w-full border-green-600 text-green-600 hover:bg-green-600 hover:text-white"
+                  >
+                    <Network className="h-4 w-4 mr-2" />
+                    Use Basic Scanner Instead
                   </Button>
                 )}
 
@@ -1403,7 +1510,9 @@ export default function ScanningPage() {
             </TabsList>
 
             <TabsContent value="results" className="space-y-4">
-              {selectedScan ? (
+              {currentScan && currentScan.status === 'completed' ? (
+                <ScanResultsView scan={currentScan} />
+              ) : selectedScan ? (
                 <ScanResultsView scan={selectedScan} />
               ) : (
                 <Card className="bg-secondary/30 border-border">
@@ -1553,6 +1662,14 @@ export default function ScanningPage() {
           </Tabs>
         </div>
       </div>
+        </NmapDetection>
+      )}
+
+
+
+
+
+
     </div>
   )
 }
@@ -1631,24 +1748,26 @@ function ScanResultsView({ scan }: { scan: ScanResult }) {
                   <>
                     <div>
                       <p className="text-sm text-muted-foreground">Total Ports</p>
-                      <p className="font-medium text-foreground">{scan.results.total_ports || scan.results.data?.length || 0}</p>
+                      <p className="font-medium text-foreground">
+                        {scan.results.total_ports || scan.results.data?.length || scan.results.ports_scanned || 0}
+                      </p>
                     </div>
                     <div>
                       <p className="text-sm text-muted-foreground">Open Ports</p>
                       <p className="font-medium text-foreground text-green-400">
-                        {scan.results.open_ports || (scan.results.data?.filter((p: any) => p.state === "open")?.length || 0)}
+                        {scan.results.open_ports?.length || scan.results.open_count || (scan.results.data?.filter((p: any) => p.state === "open")?.length || 0)}
                       </p>
                     </div>
                     <div>
                       <p className="text-sm text-muted-foreground">Closed Ports</p>
                       <p className="font-medium text-foreground text-red-400">
-                        {(scan.results.data?.filter((p: any) => p.state === "closed")?.length || 0)}
+                        {scan.results.closed_ports?.length || scan.results.closed_count || (scan.results.data?.filter((p: any) => p.state === "closed")?.length || 0)}
                       </p>
                     </div>
                     <div>
                       <p className="text-sm text-muted-foreground">Filtered Ports</p>
                       <p className="font-medium text-foreground text-yellow-400">
-                        {(scan.results.data?.filter((p: any) => p.state === "filtered")?.length || 0)}
+                        {scan.results.filtered_ports?.length || scan.results.filtered_count || (scan.results.data?.filter((p: any) => p.state === "filtered")?.length || 0)}
                       </p>
                     </div>
                     {scan.results.os_info && Object.keys(scan.results.os_info).length > 0 && (
@@ -1662,28 +1781,58 @@ function ScanResultsView({ scan }: { scan: ScanResult }) {
                   </>
                 )}
                 
-                {scan.results.type === "vulnerability_scan" && (
+                {(scan.results.type === "vulnerability_scan" || scan.results.alerts) && (
                   <>
                     <div>
                       <p className="text-sm text-muted-foreground">Total Vulnerabilities</p>
-                      <p className="font-medium text-foreground">{scan.results.total_vulnerabilities || scan.results.data?.length || 0}</p>
+                      <p className="font-medium text-foreground">
+                        {scan.results.summary?.total_alerts || 
+                         scan.results.alerts?.alerts?.length || 
+                         scan.results.total_vulnerabilities || 
+                         scan.results.data?.length || 0}
+                      </p>
                     </div>
                     <div>
                       <p className="text-sm text-muted-foreground">Critical</p>
                       <p className="font-medium text-foreground text-red-400">
-                        {scan.results.critical_vulnerabilities || (scan.results.data?.filter((v: any) => v.severity === "critical")?.length || 0)}
+                        {(scan.results.alerts?.alerts?.filter((a: any) => 
+                          a.risk?.toLowerCase() === "critical"
+                        )?.length || 0)}
                       </p>
                     </div>
                     <div>
                       <p className="text-sm text-muted-foreground">High</p>
                       <p className="font-medium text-foreground text-orange-400">
-                        {scan.results.high_vulnerabilities || (scan.results.data?.filter((v: any) => v.severity === "high")?.length || 0)}
+                        {(scan.results.alerts?.alerts?.filter((a: any) => 
+                          a.risk?.toLowerCase() === "high"
+                        )?.length || 0)}
                       </p>
                     </div>
                     <div>
                       <p className="text-sm text-muted-foreground">Medium</p>
                       <p className="font-medium text-foreground text-yellow-400">
-                        {scan.results.medium_vulnerabilities || (scan.results.data?.filter((v: any) => v.severity === "medium")?.length || 0)}
+                        {(scan.results.alerts?.alerts?.filter((a: any) => 
+                          a.risk?.toLowerCase() === "medium"
+                        )?.length || 0)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-muted-foreground">Low</p>
+                      <p className="font-medium text-foreground text-blue-400">
+                        {(scan.results.alerts?.alerts?.filter((a: any) => 
+                          a.risk?.toLowerCase() === "low"
+                        )?.length || 0)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-muted-foreground">Informational</p>
+                      <p className="font-medium text-foreground text-gray-400">
+                        {(scan.results.alerts?.alerts?.filter((a: any) => 
+                          a.risk?.toLowerCase() === "informational" || 
+                          a.risk?.toLowerCase() === "info" || 
+                          !a.risk || 
+                          a.risk === ""
+                        )?.length || 0)}
                       </p>
                     </div>
                   </>
@@ -1751,22 +1900,10 @@ function ScanResultsView({ scan }: { scan: ScanResult }) {
         </Card>
       )}
 
-      {/* Debug Info */}
-      {process.env.NODE_ENV === 'development' && (
-        <Card className="bg-yellow-900/20 border-yellow-700/50">
-          <CardHeader>
-            <CardTitle className="text-foreground text-sm">Debug Info</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <pre className="text-xs text-muted-foreground overflow-auto">
-              {JSON.stringify(scan.results, null, 2)}
-            </pre>
-          </CardContent>
-        </Card>
-      )}
+
 
       {/* Detailed Results */}
-      {scan.results.type === "port_scan" && (
+      {(scan.results.type === "port_scan" || scan.results.open_ports || scan.results.data) && (
         <PortScanResults results={scan.results} expandedSections={expandedSections} toggleSection={toggleSection} />
       )}
 
@@ -1817,12 +1954,28 @@ function ScanResultsView({ scan }: { scan: ScanResult }) {
 }
 
 function PortScanResults({ results, expandedSections, toggleSection }: any) {
-  const openPorts = results.data.filter((port: any) => port.state === "open")
-  const closedPorts = results.data.filter((port: any) => port.state === "closed")
-  const filteredPorts = results.data.filter((port: any) => port.state === "filtered")
   
-  // Debug: Log the counts
-  console.log(`Port counts - Open: ${openPorts.length}, Closed: ${closedPorts.length}, Filtered: ${filteredPorts.length}`)
+  // Handle different result formats
+  let portsData = []
+  let openPorts = []
+  let closedPorts = []
+  let filteredPorts = []
+  
+  // Check if this is basic scanner format (has open_ports, closed_ports arrays)
+  if (results.open_ports && Array.isArray(results.open_ports)) {
+    openPorts = results.open_ports
+    closedPorts = results.closed_ports || []
+    filteredPorts = results.filtered_ports || []
+    portsData = [...openPorts, ...closedPorts, ...filteredPorts]
+  } else {
+    // Standard format (has data array with state property)
+    portsData = results.data || results || []
+    openPorts = portsData.filter((port: any) => port.state === "open")
+    closedPorts = portsData.filter((port: any) => port.state === "closed")
+    filteredPorts = portsData.filter((port: any) => port.state === "filtered")
+  }
+  
+
 
   return (
     <div className="space-y-4">
@@ -1970,204 +2123,81 @@ function PortScanResults({ results, expandedSections, toggleSection }: any) {
 }
 
 function VulnerabilityScanResults({ results, expandedSections, toggleSection }: any) {
-  const criticalVulns = results.data.filter((vuln: any) => vuln.severity === "critical")
-  const highVulns = results.data.filter((vuln: any) => vuln.severity === "high")
-  const mediumVulns = results.data.filter((vuln: any) => vuln.severity === "medium")
-  const lowVulns = results.data.filter((vuln: any) => vuln.severity === "low")
+  const [riskFilter, setRiskFilter] = useState<string>("All");
+
+  // ZAP results structure fallback
+  const alerts = results?.alerts?.alerts || [];
+
+  // Map ZAP risk levels to consistent keys
+  const riskMap: Record<string, string> = {
+    "critical": "Critical",
+    "high": "High", 
+    "medium": "Medium",
+    "low": "Low",
+    "informational": "Informational",
+    "info": "Informational",
+    "": "Informational"
+  };
+
+  // Normalize risk for each alert
+  const normalizedAlerts = alerts.map((alert: any) => ({
+    ...alert,
+    normalizedRisk: riskMap[(alert.risk || "informational").toLowerCase()] || "Informational"
+  }));
+
+  // Filtered alerts by risk
+  const filteredAlerts = riskFilter === "All"
+    ? normalizedAlerts
+    : normalizedAlerts.filter((alert: any) => alert.normalizedRisk === riskFilter);
+
+  // Count by risk
+  const riskLevels = ["Critical", "High", "Medium", "Low", "Informational"];
+  const riskCounts = riskLevels.reduce((acc, level) => {
+    acc[level] = normalizedAlerts.filter((a: any) => a.normalizedRisk === level).length;
+    return acc;
+  }, {} as Record<string, number>);
 
   return (
     <div className="space-y-4">
-      {/* Critical Vulnerabilities */}
-      {criticalVulns.length > 0 && (
-        <Card className="bg-red-900/20 border-red-700/50">
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="h-5 w-5 text-red-400" />
-                Critical Vulnerabilities ({criticalVulns.length})
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => toggleSection("critical")}
-              >
-                {expandedSections.includes("critical") ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-              </Button>
-            </CardTitle>
-          </CardHeader>
-          <Collapsible open={expandedSections.includes("critical")}>
-            <CollapsibleContent>
-              <CardContent>
-                <div className="space-y-3">
-                  {criticalVulns.map((vuln: any, index: number) => (
-                    <div key={index} className="p-4 bg-red-900/30 border border-red-700/50 rounded-lg">
-                      <div className="flex items-start justify-between mb-2">
-                        <div className="flex items-start gap-3">
-                          <AlertTriangle className="h-5 w-5 text-red-400 flex-shrink-0 mt-0.5" />
-                          <div>
-                            <p className="font-medium text-foreground">{vuln.title}</p>
-                            <p className="text-sm text-muted-foreground">{vuln.id}</p>
-                            {vuln.cve && (
-                              <p className="text-sm text-red-300">{vuln.cve}</p>
-                            )}
-                          </div>
-                        </div>
-                        <Badge className="bg-red-600">CRITICAL</Badge>
-                      </div>
-                      <p className="text-sm text-muted-foreground mb-2">{vuln.description}</p>
-                      <p className="text-xs text-muted-foreground">Port: {vuln.port}</p>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </CollapsibleContent>
-          </Collapsible>
-        </Card>
-      )}
+      {/* Risk Level Dropdown */}
+      <div className="flex items-center gap-4 mb-2">
+        <Label htmlFor="risk-filter">Risk Level:</Label>
+        <Select value={riskFilter} onValueChange={setRiskFilter}>
+          <SelectTrigger className="w-48" id="risk-filter">
+            <SelectValue>{riskFilter}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="All">All ({normalizedAlerts.length})</SelectItem>
+            {riskLevels.map(level => (
+              <SelectItem key={level} value={level}>{level} ({riskCounts[level]})</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
 
-      {/* High Vulnerabilities */}
-      {highVulns.length > 0 && (
-        <Card className="bg-orange-900/20 border-orange-700/50">
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="h-5 w-5 text-orange-400" />
-                High Vulnerabilities ({highVulns.length})
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => toggleSection("high")}
-              >
-                {expandedSections.includes("high") ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-              </Button>
-            </CardTitle>
-          </CardHeader>
-          <Collapsible open={expandedSections.includes("high")}>
-            <CollapsibleContent>
+      {/* Vulnerabilities List/Table */}
+      {filteredAlerts.length === 0 ? (
+        <div className="text-muted-foreground">No vulnerabilities found for this risk level.</div>
+      ) : (
+        <div className="space-y-2">
+          {filteredAlerts.map((alert: any, idx: number) => (
+            <Card key={idx} className="border border-gray-700/50">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Badge>{alert.normalizedRisk}</Badge>
+                  <span>{alert.name}</span>
+                  <span className="text-xs text-muted-foreground">({alert.url})</span>
+                </CardTitle>
+              </CardHeader>
               <CardContent>
-                <div className="space-y-3">
-                  {highVulns.map((vuln: any, index: number) => (
-                    <div key={index} className="p-4 bg-orange-900/30 border border-orange-700/50 rounded-lg">
-                      <div className="flex items-start justify-between mb-2">
-                        <div className="flex items-start gap-3">
-                          <AlertTriangle className="h-5 w-5 text-orange-400 flex-shrink-0 mt-0.5" />
-                          <div>
-                            <p className="font-medium text-foreground">{vuln.title}</p>
-                            <p className="text-sm text-muted-foreground">{vuln.id}</p>
-                            {vuln.cve && (
-                              <p className="text-sm text-orange-300">{vuln.cve}</p>
-                            )}
-                          </div>
-                        </div>
-                        <Badge className="bg-orange-600">HIGH</Badge>
-                      </div>
-                      <p className="text-sm text-muted-foreground mb-2">{vuln.description}</p>
-                      <p className="text-xs text-muted-foreground">Port: {vuln.port}</p>
-                    </div>
-                  ))}
-                </div>
+                <div className="text-sm mb-1"><b>Description:</b> {alert.description}</div>
+                {alert.solution && <div className="text-xs mb-1"><b>Solution:</b> {alert.solution}</div>}
+                {alert.reference && <div className="text-xs"><b>Reference:</b> <a href={alert.reference.split("\n")[0]} target="_blank" rel="noopener noreferrer">{alert.reference.split("\n")[0]}</a></div>}
               </CardContent>
-            </CollapsibleContent>
-          </Collapsible>
-        </Card>
-      )}
-
-      {/* Medium Vulnerabilities */}
-      {mediumVulns.length > 0 && (
-        <Card className="bg-yellow-900/20 border-yellow-700/50">
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="h-5 w-5 text-yellow-400" />
-                Medium Vulnerabilities ({mediumVulns.length})
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => toggleSection("medium")}
-              >
-                {expandedSections.includes("medium") ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-              </Button>
-            </CardTitle>
-          </CardHeader>
-          <Collapsible open={expandedSections.includes("medium")}>
-            <CollapsibleContent>
-              <CardContent>
-                <div className="space-y-3">
-                  {mediumVulns.map((vuln: any, index: number) => (
-                    <div key={index} className="p-4 bg-yellow-900/30 border border-yellow-700/50 rounded-lg">
-                      <div className="flex items-start justify-between mb-2">
-                        <div className="flex items-start gap-3">
-                          <AlertTriangle className="h-5 w-5 text-yellow-400 flex-shrink-0 mt-0.5" />
-                          <div>
-                            <p className="font-medium text-foreground">{vuln.title}</p>
-                            <p className="text-sm text-muted-foreground">{vuln.id}</p>
-                            {vuln.cve && (
-                              <p className="text-sm text-yellow-300">{vuln.cve}</p>
-                            )}
-                          </div>
-                        </div>
-                        <Badge className="bg-yellow-600">MEDIUM</Badge>
-                      </div>
-                      <p className="text-sm text-muted-foreground mb-2">{vuln.description}</p>
-                      <p className="text-xs text-muted-foreground">Port: {vuln.port}</p>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </CollapsibleContent>
-          </Collapsible>
-        </Card>
-      )}
-
-      {/* Low Vulnerabilities */}
-      {lowVulns.length > 0 && (
-        <Card className="bg-blue-900/20 border-blue-700/50">
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="h-5 w-5 text-blue-400" />
-                Low Vulnerabilities ({lowVulns.length})
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => toggleSection("low")}
-              >
-                {expandedSections.includes("low") ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-              </Button>
-            </CardTitle>
-          </CardHeader>
-          <Collapsible open={expandedSections.includes("low")}>
-            <CollapsibleContent>
-              <CardContent>
-                <div className="space-y-3">
-                  {lowVulns.map((vuln: any, index: number) => (
-                    <div key={index} className="p-4 bg-blue-900/30 border border-blue-700/50 rounded-lg">
-                      <div className="flex items-start justify-between mb-2">
-                        <div className="flex items-start gap-3">
-                          <AlertTriangle className="h-5 w-5 text-blue-400 flex-shrink-0 mt-0.5" />
-                          <div>
-                            <p className="font-medium text-foreground">{vuln.title}</p>
-                            <p className="text-sm text-muted-foreground">{vuln.id}</p>
-                            {vuln.cve && (
-                              <p className="text-sm text-blue-300">{vuln.cve}</p>
-                            )}
-                          </div>
-                        </div>
-                        <Badge className="bg-blue-600">LOW</Badge>
-                      </div>
-                      <p className="text-sm text-muted-foreground mb-2">{vuln.description}</p>
-                      <p className="text-xs text-muted-foreground">Port: {vuln.port}</p>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </CollapsibleContent>
-          </Collapsible>
-        </Card>
+            </Card>
+          ))}
+        </div>
       )}
     </div>
-  )
+  );
 }

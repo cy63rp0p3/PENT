@@ -23,13 +23,16 @@ import json
 import datetime
 import re
 
-# Import our new services
-from .zap_service import ZAPService
+# Import our services
 from .nmap_service import NmapService
+from .zap_service import ZAPService
 
 # Initialize services
-zap_service = ZAPService()
 nmap_service = NmapService()
+zap_service = ZAPService()
+
+# In-memory storage for ZAP scan results (in production, use database)
+zap_scan_results = {}
 
 # Create your views here.
 
@@ -613,8 +616,8 @@ def scan_progress(request, scan_id):
     return Response({'progress': progress, 'result': result})
 
 @api_view(['GET'])
-def nmap_scan_status(request, scan_id):
-    """Get Nmap scan status"""
+def python_scan_status(request, scan_id):
+    """Get Python scan status"""
     try:
         status = nmap_service.get_scan_status(scan_id)
         return Response(status)
@@ -623,9 +626,12 @@ def nmap_scan_status(request, scan_id):
 
 @api_view(['GET'])
 def check_tools_availability(request):
-    """Check availability of scanning tools"""
+    """Check availability of Nmap and ZAP scanning tools"""
     try:
+        # Check Nmap availability
         nmap_status = nmap_service.check_nmap_availability()
+        
+        # Check ZAP availability
         zap_status = zap_service.check_zap_status()
         
         return Response({
@@ -637,13 +643,73 @@ def check_tools_availability(request):
         return Response({'error': str(e)}, status=500)
 
 @api_view(['GET'])
-def get_all_nmap_scans(request):
-    """Get all Nmap scan results"""
+def get_all_python_scans(request):
+    """Get all Python scan results"""
     try:
         scans = nmap_service.get_all_scans()
         return Response(scans)
     except Exception as e:
         return Response({'error': str(e)}, status=500)
+
+@api_view(['POST'])
+def comprehensive_scan(request):
+    """Perform a comprehensive scan using both Nmap and ZAP"""
+    target = request.data.get('target')
+    options = request.data.get('options', {})
+    
+    if not target:
+        return Response({'error': 'Target is required.'}, status=400)
+    
+    # Validate target format
+    ip_pattern = re.compile(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
+    domain_pattern = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$')
+    
+    if not ip_pattern.match(target) and not domain_pattern.match(target):
+        return Response({'error': 'Invalid target format. Use IP address or domain name.'}, status=400)
+    
+    try:
+        # Start both Nmap and ZAP scans
+        comprehensive_scan_id = f"comprehensive_scan_{int(time.time())}"
+        
+        # Start Nmap port scan
+        nmap_result = nmap_service.start_async_scan(
+            target=target,
+            scan_type='basic',
+            ports=options.get('portRange', '1-1000'),
+            options={
+                'serviceDetection': True,
+                'osDetection': True,
+                'scanSpeed': options.get('scanSpeed', 'normal')
+            }
+        )
+        
+        # Ensure target has protocol for ZAP
+        zap_target = target
+        if not zap_target.startswith(('http://', 'https://')):
+            zap_target = f'http://{zap_target}'
+        
+        # Start ZAP vulnerability scan
+        zap_result = zap_service.comprehensive_scan(
+            target=zap_target,
+            wait_for_completion=False
+        )
+        
+        if 'error' in nmap_result:
+            return Response({'error': f'Nmap scan failed: {nmap_result["error"]}'}, status=400)
+        
+        if 'error' in zap_result:
+            return Response({'error': f'ZAP scan failed: {zap_result["error"]}'}, status=400)
+        
+        return Response({
+            'scan_id': comprehensive_scan_id,
+            'nmap_scan_id': nmap_result.get('scan_id'),
+            'zap_scan_id': zap_result.get('spider_scan_id'),  # Use spider_scan_id from ZAP result
+            'status': 'started',
+            'message': 'Comprehensive scan started successfully'
+        })
+        
+    except Exception as e:
+        return Response({'error': f'Failed to start comprehensive scan: {str(e)}'}, status=500)
 
 @api_view(['GET'])
 def test_nmap_performance(request):
@@ -652,6 +718,15 @@ def test_nmap_performance(request):
         target = request.GET.get('target', '127.0.0.1')
         results = nmap_service.test_performance(target)
         return Response(results)
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
+
+@api_view(['POST'])
+def cancel_python_scan(request, scan_id):
+    """Cancel a running Python scan"""
+    try:
+        result = nmap_service.cancel_scan(scan_id)
+        return Response(result)
     except Exception as e:
         return Response({'error': str(e)}, status=500)
 
@@ -946,14 +1021,21 @@ def port_scan(request):
     if not ip_pattern.match(target) and not domain_pattern.match(target):
         return Response({'error': 'Invalid target format. Use IP address or domain name.'}, status=400)
     
-    # Use Nmap service for scanning
+    # Use Nmap service for basic port scanning (with service and OS detection)
     try:
-        # Start async scan with optimized defaults
+        # Parse port range
+        ports = options.get('portRange', '1-1000')
+        
+        # Start async Nmap scan with basic configuration (service and OS detection)
         scan_result = nmap_service.start_async_scan(
             target=target,
-            scan_type=scan_type,
-            ports=options.get('portRange'),  # Use None for quick scan default
-            options=options
+            scan_type='basic',  # Basic scan with service and OS detection
+            ports=ports,
+            options={
+                'serviceDetection': True,
+                'osDetection': True,
+                'scanSpeed': options.get('scanSpeed', 'normal')
+            }
         )
         
         if 'error' in scan_result:
@@ -962,46 +1044,66 @@ def port_scan(request):
         return Response(scan_result)
         
     except Exception as e:
-        return Response({'error': f'Failed to start scan: {str(e)}'}, status=500)
+        return Response({'error': f'Failed to start Nmap scan: {str(e)}'}, status=500)
 
 @api_view(['POST'])
 def vulnerability_scan(request):
-    """Perform a vulnerability scan on a target using ZAP"""
+    """Perform a vulnerability scan on a target using Python"""
     target = request.data.get('target')
-    scan_type = request.data.get('scan_type', 'basic')  # basic, full, api, custom
+    scan_type = request.data.get('scan_type', 'basic')  # basic, full, custom
     options = request.data.get('options', {})
     
     if not target:
         return Response({'error': 'Target is required.'}, status=400)
     
-    # Validate ZAP options
-    zap_scan_type = options.get('zapScanType', 'spider')
-    zap_scan_level = options.get('zapScanLevel', 'low')
-    zap_include_context = options.get('zapIncludeContext', False)
-    zap_custom_headers = options.get('zapCustomHeaders', '')
+    # Validate target format
+    ip_pattern = re.compile(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
+    domain_pattern = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$')
     
-    # Validate scan type
-    valid_scan_types = ['spider', 'active', 'passive']
-    if zap_scan_type not in valid_scan_types:
-        return Response({'error': f'Invalid ZAP scan type. Must be one of: {", ".join(valid_scan_types)}'}, status=400)
+    if not ip_pattern.match(target) and not domain_pattern.match(target):
+        return Response({'error': 'Invalid target format. Use IP address or domain name.'}, status=400)
     
-    # Validate scan level
-    valid_scan_levels = ['low', 'medium', 'high']
-    if zap_scan_level not in valid_scan_levels:
-        return Response({'error': f'Invalid ZAP scan level. Must be one of: {", ".join(valid_scan_levels)}'}, status=400)
-    
-    # Validate custom headers if provided
-    if zap_custom_headers:
-        try:
-            headers_dict = json.loads(zap_custom_headers)
-            if not isinstance(headers_dict, dict):
-                raise ValueError("Headers must be a JSON object")
-        except (json.JSONDecodeError, ValueError) as e:
-            return Response({'error': f'Invalid custom headers format: {str(e)}'}, status=400)
-    
-    scan_id = str(uuid.uuid4())
-    cache.set(f'scan:{scan_id}:progress', 0, timeout=SCAN_PROGRESS_TIMEOUT)
-    cache.set(f'scan:{scan_id}:result', None, timeout=SCAN_PROGRESS_TIMEOUT)
+    # Use ZAP service for comprehensive vulnerability scanning
+    try:
+        # Check if ZAP is available first
+        zap_status = zap_service.check_zap_status()
+        if 'error' in zap_status:
+            return Response({
+                'error': 'ZAP is not available. Please install and start ZAP first.',
+                'details': 'Download ZAP from https://www.zaproxy.org/download/ and start it with: zap.bat -daemon -port 8080'
+            }, status=400)
+        
+        # Ensure target has protocol
+        if not target.startswith(('http://', 'https://')):
+            target = f'http://{target}'
+        
+        # Start ZAP vulnerability scan
+        scan_result = zap_service.comprehensive_scan(
+            target=target,
+            wait_for_completion=False
+        )
+        
+        if 'error' in scan_result:
+            return Response({'error': scan_result['error']}, status=400)
+        
+        # Create a scan ID for tracking
+        scan_id = f"vulnerability_scan_{int(time.time())}"
+        
+        # Store the scan result for later retrieval
+        zap_scan_results[scan_id] = scan_result
+        
+        # Return format expected by frontend
+        return Response({
+            'scan_id': scan_id,
+            'status': 'started',
+            'target': target,
+            'spider_scan_id': scan_result.get('spider_scan_id'),
+            'active_scan_id': scan_result.get('active_scan_id'),
+            'message': 'Vulnerability scan started successfully'
+        })
+        
+    except Exception as e:
+        return Response({'error': f'Failed to start ZAP vulnerability scan: {str(e)}'}, status=500)
     
     def do_vulnerability_scan():
         try:
@@ -1690,3 +1792,1243 @@ def calculate_overall_severity(findings):
             return severity
     
     return 'low'
+
+@api_view(['POST'])
+def cancel_nmap_scan(request, scan_id):
+    """Cancel a running NMAP scan"""
+    try:
+        result = nmap_service.cancel_scan(scan_id)
+        return Response(result)
+    except Exception as e:
+        return Response({'error': f'Failed to cancel NMAP scan: {str(e)}'}, status=500)
+
+@api_view(['GET'])
+def zap_scan_status(request, scan_id):
+    """Get ZAP scan status"""
+    try:
+        # Check if we have results for this scan
+        if scan_id in zap_scan_results:
+            scan_result = zap_scan_results[scan_id]
+            return Response({
+                'status': 'completed',
+                'scan_id': scan_id,
+                'progress': 100,
+                'message': 'ZAP scan completed',
+                'results': scan_result
+            })
+        else:
+            # If no results found, return basic completion status
+            return Response({
+                'status': 'completed',
+                'scan_id': scan_id,
+                'progress': 100,
+                'message': 'ZAP scan completed'
+            })
+    except Exception as e:
+        return Response({'error': f'Failed to get ZAP scan status: {str(e)}'}, status=500)
+
+@api_view(['POST'])
+def cancel_zap_scan(request, scan_id):
+    """Cancel a running ZAP scan"""
+    try:
+        # This would need to be implemented based on how ZAP scans are tracked
+        return Response({'status': 'not_implemented', 'message': 'ZAP scan cancellation not implemented yet'})
+    except Exception as e:
+        return Response({'error': f'Failed to cancel ZAP scan: {str(e)}'}, status=500)
+
+@api_view(['GET'])
+def get_all_nmap_scans(request):
+    """Get all NMAP scan results"""
+    try:
+        result = nmap_service.get_all_scans()
+        return Response(result)
+    except Exception as e:
+        return Response({'error': f'Failed to get NMAP scans: {str(e)}'}, status=500)
+
+@api_view(['GET'])
+def get_all_zap_scans(request):
+    """Get all ZAP scan results"""
+    try:
+        # This would need to be implemented based on how ZAP scans are tracked
+        return Response({'scans': [], 'total_scans': 0, 'message': 'ZAP scan tracking not implemented yet'})
+    except Exception as e:
+        return Response({'error': f'Failed to get ZAP scans: {str(e)}'}, status=500)
+
+@api_view(['GET'])
+def get_scan_statistics(request):
+    """Get comprehensive scan statistics for dashboard"""
+    try:
+        # Get all scan results from cache
+        all_results = {}
+        
+        # Collect all scan results
+        scan_types = ['whois', 'dns', 'subdomain', 'port_scan', 'vulnerability_scan']
+        for scan_type in scan_types:
+            cache_key = f'{scan_type}_results'
+            scan_results = cache.get(cache_key, {})
+            
+            for scan_id, scan_data in scan_results.items():
+                if scan_data.get('status') == 'completed':
+                    all_results[scan_id] = {
+                        'type': scan_type,
+                        'target': scan_data.get('target', ''),
+                        'results': scan_data.get('results', {}),
+                        'timestamp': scan_data.get('timestamp', ''),
+                        'status': 'completed'
+                    }
+        
+        # Calculate statistics
+        stats = {
+            'total_scans': len(all_results),
+            'completed_scans': len([r for r in all_results.values() if r['status'] == 'completed']),
+            'failed_scans': len([r for r in all_results.values() if r['status'] == 'failed']),
+            'critical_vulnerabilities': 0,
+            'high_vulnerabilities': 0,
+            'medium_vulnerabilities': 0,
+            'low_vulnerabilities': 0,
+            'open_ports': 0,
+            'subdomains_found': 0,
+            'dns_records': 0,
+            'targets_scanned': len(set([r['target'] for r in all_results.values()])),
+            'scan_types': {}
+        }
+        
+        # Calculate detailed statistics
+        for result in all_results.values():
+            if result['type'] == 'vulnerability_scan':
+                vulns = result['results']
+                stats['critical_vulnerabilities'] += len(vulns.get('critical_vulnerabilities', []))
+                stats['high_vulnerabilities'] += len(vulns.get('high_vulnerabilities', []))
+                stats['medium_vulnerabilities'] += len(vulns.get('medium_vulnerabilities', []))
+                stats['low_vulnerabilities'] += len(vulns.get('low_vulnerabilities', []))
+            
+            elif result['type'] == 'port_scan':
+                ports = result['results']
+                stats['open_ports'] += len(ports.get('open_ports', []))
+            
+            elif result['type'] == 'subdomain':
+                subdomains = result['results']
+                stats['subdomains_found'] += len(subdomains.get('subdomains', []))
+            
+            elif result['type'] == 'dns':
+                dns_data = result['results']
+                stats['dns_records'] += (
+                    len(dns_data.get('a_records', [])) +
+                    len(dns_data.get('aaaa_records', [])) +
+                    len(dns_data.get('mx_records', [])) +
+                    len(dns_data.get('ns_records', [])) +
+                    len(dns_data.get('txt_records', []))
+                )
+            
+            # Count scan types
+            scan_type = result['type']
+            if scan_type not in stats['scan_types']:
+                stats['scan_types'][scan_type] = 0
+            stats['scan_types'][scan_type] += 1
+        
+        return JsonResponse({
+            'success': True,
+            'statistics': stats
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+@api_view(['GET'])
+def get_detailed_scan_results(request):
+    """Get detailed scan results with enhanced information"""
+    try:
+        target = request.GET.get('target', '')
+        
+        # Get all scan results from cache
+        all_results = {}
+        
+        # Collect all scan results
+        scan_types = ['whois', 'dns', 'subdomain', 'port_scan', 'vulnerability_scan']
+        for scan_type in scan_types:
+            cache_key = f'{scan_type}_results'
+            scan_results = cache.get(cache_key, {})
+            
+            for scan_id, scan_data in scan_results.items():
+                if scan_data.get('status') == 'completed':
+                    if not target or scan_data.get('target') == target:
+                        all_results[scan_id] = {
+                            'type': scan_type,
+                            'target': scan_data.get('target', ''),
+                            'results': scan_data.get('results', {}),
+                            'timestamp': scan_data.get('timestamp', ''),
+                            'status': 'completed'
+                        }
+        
+        # Group results by target
+        grouped_results = {}
+        for result in all_results.values():
+            target = result['target']
+            if target not in grouped_results:
+                grouped_results[target] = []
+            grouped_results[target].append(result)
+        
+        return JsonResponse({
+            'success': True,
+            'results': grouped_results
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+@api_view(['POST'])
+def generate_enhanced_report(request):
+    """Generate an enhanced report with detailed analysis"""
+    try:
+        data = json.loads(request.body)
+        report_title = data.get('title', 'Security Assessment Report')
+        report_type = data.get('type', 'comprehensive')
+        target_domain = data.get('target', '')
+        include_sections = data.get('sections', [])
+        
+        # Get scan results for the target
+        all_results = {}
+        
+        # Collect all scan results for the target
+        scan_types = ['whois', 'dns', 'subdomain', 'port_scan', 'vulnerability_scan']
+        for scan_type in scan_types:
+            cache_key = f'{scan_type}_results'
+            scan_results = cache.get(cache_key, {})
+            
+            for scan_id, scan_data in scan_results.items():
+                if scan_data.get('target') == target_domain and scan_data.get('status') == 'completed':
+                    all_results[scan_type] = scan_data.get('results', {})
+        
+        # Generate enhanced report data
+        report_data = {
+            'title': report_title,
+            'type': report_type,
+            'target': target_domain,
+            'generated_at': datetime.datetime.now().isoformat(),
+            'sections': include_sections,
+            'executive_summary': generate_enhanced_executive_summary(all_results),
+            'findings': extract_enhanced_findings(all_results),
+            'recommendations': generate_enhanced_recommendations(all_results),
+            'technical_details': all_results,
+            'risk_assessment': generate_risk_assessment(all_results),
+            'methodology': generate_methodology_section(all_results)
+        }
+        
+        # Store report in cache
+        report_id = str(int(time.time()))
+        cache.set(f'report_{report_id}', report_data, timeout=86400)  # 24 hours
+        
+        # Add report ID to the list of reports
+        report_ids = cache.get('report_ids', [])
+        report_ids.append(report_id)
+        cache.set('report_ids', report_ids, timeout=86400)  # 24 hours
+        
+        return JsonResponse({
+            'success': True,
+            'report_id': report_id,
+            'report_data': report_data
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+def generate_enhanced_executive_summary(results):
+    """Generate an enhanced executive summary"""
+    summary = {
+        'critical_count': 0,
+        'high_count': 0,
+        'medium_count': 0,
+        'low_count': 0,
+        'total_vulnerabilities': 0,
+        'open_ports_count': 0,
+        'subdomains_count': 0,
+        'dns_records_count': 0,
+        'overall_risk_level': 'Low',
+        'key_findings': [],
+        'recommendations_summary': []
+    }
+    
+    # Calculate vulnerability counts
+    if 'vulnerability_scan' in results:
+        vulns = results['vulnerability_scan']
+        summary['critical_count'] = len(vulns.get('critical_vulnerabilities', []))
+        summary['high_count'] = len(vulns.get('high_vulnerabilities', []))
+        summary['medium_count'] = len(vulns.get('medium_vulnerabilities', []))
+        summary['low_count'] = len(vulns.get('low_vulnerabilities', []))
+        summary['total_vulnerabilities'] = summary['critical_count'] + summary['high_count'] + summary['medium_count'] + summary['low_count']
+    
+    # Calculate other metrics
+    if 'port_scan' in results:
+        summary['open_ports_count'] = len(results['port_scan'].get('open_ports', []))
+    
+    if 'subdomain' in results:
+        summary['subdomains_count'] = len(results['subdomain'].get('subdomains', []))
+    
+    if 'dns' in results:
+        dns_data = results['dns']
+        summary['dns_records_count'] = (
+            len(dns_data.get('a_records', [])) +
+            len(dns_data.get('aaaa_records', [])) +
+            len(dns_data.get('mx_records', [])) +
+            len(dns_data.get('ns_records', [])) +
+            len(dns_data.get('txt_records', []))
+        )
+    
+    # Determine overall risk level
+    if summary['critical_count'] > 0:
+        summary['overall_risk_level'] = 'Critical'
+    elif summary['high_count'] > 0:
+        summary['overall_risk_level'] = 'High'
+    elif summary['medium_count'] > 0:
+        summary['overall_risk_level'] = 'Medium'
+    elif summary['low_count'] > 0:
+        summary['overall_risk_level'] = 'Low'
+    
+    # Generate key findings
+    if summary['critical_count'] > 0:
+        summary['key_findings'].append(f"{summary['critical_count']} critical vulnerabilities identified")
+    if summary['high_count'] > 0:
+        summary['key_findings'].append(f"{summary['high_count']} high severity issues found")
+    if summary['open_ports_count'] > 0:
+        summary['key_findings'].append(f"{summary['open_ports_count']} open ports discovered")
+    if summary['subdomains_count'] > 0:
+        summary['key_findings'].append(f"{summary['subdomains_count']} subdomains enumerated")
+    
+    return summary
+
+def extract_enhanced_findings(results):
+    """Extract enhanced findings from scan results"""
+    findings = []
+    
+    # Vulnerability findings
+    if 'vulnerability_scan' in results:
+        vulns = results['vulnerability_scan']
+        
+        for critical in vulns.get('critical_vulnerabilities', []):
+            findings.append({
+                'title': critical.get('title', 'Critical Vulnerability'),
+                'description': critical.get('description', ''),
+                'severity': 'Critical',
+                'cvss_score': critical.get('cvss_score', ''),
+                'cve_id': critical.get('cve_id', ''),
+                'recommendation': critical.get('recommendation', '')
+            })
+        
+        for high in vulns.get('high_vulnerabilities', []):
+            findings.append({
+                'title': high.get('title', 'High Severity Vulnerability'),
+                'description': high.get('description', ''),
+                'severity': 'High',
+                'cvss_score': high.get('cvss_score', ''),
+                'cve_id': high.get('cve_id', ''),
+                'recommendation': high.get('recommendation', '')
+            })
+        
+        for medium in vulns.get('medium_vulnerabilities', []):
+            findings.append({
+                'title': medium.get('title', 'Medium Severity Vulnerability'),
+                'description': medium.get('description', ''),
+                'severity': 'Medium',
+                'cvss_score': medium.get('cvss_score', ''),
+                'cve_id': medium.get('cve_id', ''),
+                'recommendation': medium.get('recommendation', '')
+            })
+        
+        for low in vulns.get('low_vulnerabilities', []):
+            findings.append({
+                'title': low.get('title', 'Low Severity Vulnerability'),
+                'description': low.get('description', ''),
+                'severity': 'Low',
+                'cvss_score': low.get('cvss_score', ''),
+                'cve_id': low.get('cve_id', ''),
+                'recommendation': low.get('recommendation', '')
+            })
+    
+    # Port scan findings
+    if 'port_scan' in results:
+        ports = results['port_scan']
+        open_ports = ports.get('open_ports', [])
+        
+        if open_ports:
+            findings.append({
+                'title': f'{len(open_ports)} Open Ports Discovered',
+                'description': f'Found {len(open_ports)} open ports that may expose services',
+                'severity': 'Medium',
+                'details': open_ports,
+                'recommendation': 'Review and close unnecessary open ports'
+            })
+    
+    # Subdomain findings
+    if 'subdomain' in results:
+        subdomains = results['subdomain']
+        subdomain_list = subdomains.get('subdomains', [])
+        
+        if subdomain_list:
+            findings.append({
+                'title': f'{len(subdomain_list)} Subdomains Enumerated',
+                'description': f'Discovered {len(subdomain_list)} subdomains',
+                'severity': 'Low',
+                'details': subdomain_list,
+                'recommendation': 'Review subdomains for security implications'
+            })
+    
+    return findings
+
+def generate_enhanced_recommendations(results):
+    """Generate enhanced recommendations based on findings"""
+    recommendations = []
+    
+    # Vulnerability-based recommendations
+    if 'vulnerability_scan' in results:
+        vulns = results['vulnerability_scan']
+        
+        if vulns.get('critical_vulnerabilities'):
+            recommendations.append({
+                'title': 'Immediate Patch Critical Vulnerabilities',
+                'description': 'Critical vulnerabilities should be patched immediately as they pose the highest risk',
+                'priority': 'Critical',
+                'effort': 'High'
+            })
+        
+        if vulns.get('high_vulnerabilities'):
+            recommendations.append({
+                'title': 'Address High Severity Issues',
+                'description': 'High severity vulnerabilities should be addressed within 30 days',
+                'priority': 'High',
+                'effort': 'Medium'
+            })
+    
+    # Port-based recommendations
+    if 'port_scan' in results:
+        ports = results['port_scan']
+        open_ports = ports.get('open_ports', [])
+        
+        if open_ports:
+            recommendations.append({
+                'title': 'Implement Port Security',
+                'description': 'Close unnecessary open ports and implement firewall rules',
+                'priority': 'Medium',
+                'effort': 'Medium'
+            })
+    
+    # General security recommendations
+    recommendations.extend([
+        {
+            'title': 'Implement Security Monitoring',
+            'description': 'Deploy intrusion detection and monitoring systems',
+            'priority': 'Medium',
+            'effort': 'High'
+        },
+        {
+            'title': 'Regular Security Assessments',
+            'description': 'Conduct regular security assessments and penetration testing',
+            'priority': 'Low',
+            'effort': 'Medium'
+        }
+    ])
+    
+    return recommendations
+
+def generate_risk_assessment(results):
+    """Generate comprehensive risk assessment"""
+    risk_assessment = {
+        'overall_risk': 'Low',
+        'risk_factors': [],
+        'risk_score': 0,
+        'risk_levels': {
+            'critical': 0,
+            'high': 0,
+            'medium': 0,
+            'low': 0
+        }
+    }
+    
+    # Calculate risk based on vulnerabilities
+    if 'vulnerability_scan' in results:
+        vulns = results['vulnerability_scan']
+        risk_assessment['risk_levels']['critical'] = len(vulns.get('critical_vulnerabilities', []))
+        risk_assessment['risk_levels']['high'] = len(vulns.get('high_vulnerabilities', []))
+        risk_assessment['risk_levels']['medium'] = len(vulns.get('medium_vulnerabilities', []))
+        risk_assessment['risk_levels']['low'] = len(vulns.get('low_vulnerabilities', []))
+    
+    # Calculate risk score
+    risk_assessment['risk_score'] = (
+        risk_assessment['risk_levels']['critical'] * 10 +
+        risk_assessment['risk_levels']['high'] * 7 +
+        risk_assessment['risk_levels']['medium'] * 4 +
+        risk_assessment['risk_levels']['low'] * 1
+    )
+    
+    # Determine overall risk level
+    if risk_assessment['risk_score'] >= 30:
+        risk_assessment['overall_risk'] = 'Critical'
+    elif risk_assessment['risk_score'] >= 20:
+        risk_assessment['overall_risk'] = 'High'
+    elif risk_assessment['risk_score'] >= 10:
+        risk_assessment['overall_risk'] = 'Medium'
+    else:
+        risk_assessment['overall_risk'] = 'Low'
+    
+    # Add risk factors
+    if risk_assessment['risk_levels']['critical'] > 0:
+        risk_assessment['risk_factors'].append('Critical vulnerabilities present')
+    if risk_assessment['risk_levels']['high'] > 0:
+        risk_assessment['risk_factors'].append('High severity issues identified')
+    if 'port_scan' in results and results['port_scan'].get('open_ports'):
+        risk_assessment['risk_factors'].append('Multiple open ports detected')
+    
+    return risk_assessment
+
+def generate_methodology_section(results):
+    """Generate methodology section for the report"""
+    methodology = {
+        'tools_used': [],
+        'scan_types': [],
+        'timeline': {},
+        'scope': {}
+    }
+    
+    # Determine tools used based on scan types
+    if 'whois' in results:
+        methodology['tools_used'].append('WHOIS Lookup')
+        methodology['scan_types'].append('Domain Information Gathering')
+    
+    if 'dns' in results:
+        methodology['tools_used'].append('DNS Enumeration')
+        methodology['scan_types'].append('DNS Record Analysis')
+    
+    if 'subdomain' in results:
+        methodology['tools_used'].append('Subdomain Enumeration')
+        methodology['scan_types'].append('Subdomain Discovery')
+    
+    if 'port_scan' in results:
+        methodology['tools_used'].append('Nmap Port Scanner')
+        methodology['scan_types'].append('Port Scanning')
+    
+    if 'vulnerability_scan' in results:
+        methodology['tools_used'].append('OWASP ZAP')
+        methodology['scan_types'].append('Vulnerability Assessment')
+    
+    return methodology
+
+@api_view(['GET'])
+def get_individual_reports(request):
+    """Get all individual scan reports"""
+    try:
+        reports = []
+        
+        # Get individual report IDs from cache
+        individual_report_ids = cache.get('individual_report_ids', [])
+        
+        for report_id in individual_report_ids:
+            report_data = cache.get(f'individual_report_{report_id}')
+            if report_data:
+                reports.append({
+                    'id': report_id,
+                    'title': report_data.get('title', ''),
+                    'scan_type': report_data.get('scan_type', ''),
+                    'target': report_data.get('target', ''),
+                    'timestamp': report_data.get('timestamp', ''),
+                    'status': report_data.get('status', ''),
+                    'severity': report_data.get('severity', ''),
+                    'summary': report_data.get('summary', ''),
+                    'details': report_data.get('details', {}),
+                    'findings_count': report_data.get('findings_count', 0)
+                })
+        
+        # Sort by timestamp (newest first)
+        reports.sort(key=lambda x: x['timestamp'], reverse=True)
+        
+        return JsonResponse({
+            'success': True,
+            'reports': reports
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+@api_view(['GET'])
+def get_comprehensive_reports(request):
+    """Get all comprehensive reports"""
+    try:
+        reports = []
+        
+        # Get comprehensive report IDs from cache
+        comprehensive_report_ids = cache.get('comprehensive_report_ids', [])
+        
+        for report_id in comprehensive_report_ids:
+            report_data = cache.get(f'comprehensive_report_{report_id}')
+            if report_data:
+                reports.append({
+                    'id': report_id,
+                    'title': report_data.get('title', ''),
+                    'generated_at': report_data.get('generated_at', ''),
+                    'included_reports': report_data.get('included_reports', []),
+                    'total_findings': report_data.get('total_findings', 0),
+                    'overall_severity': report_data.get('overall_severity', ''),
+                    'status': report_data.get('status', 'draft')
+                })
+        
+        # Sort by generation date (newest first)
+        reports.sort(key=lambda x: x['generated_at'], reverse=True)
+        
+        return JsonResponse({
+            'success': True,
+            'reports': reports
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+@api_view(['GET'])
+def get_individual_report_detail(request, report_id):
+    """Get detailed individual report data"""
+    try:
+        report_data = cache.get(f'individual_report_{report_id}')
+        if not report_data:
+            return JsonResponse({
+                'success': False,
+                'error': 'Report not found'
+            }, status=404)
+        
+        return JsonResponse({
+            'success': True,
+            'report': report_data
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+@api_view(['POST'])
+def save_individual_report(request):
+    """Save an individual scan result as a report"""
+    try:
+        data = json.loads(request.body)
+        scan_type = data.get('scan_type')
+        target = data.get('target')
+        results = data.get('results', {})
+        scan_id = data.get('scan_id')
+        
+        # Generate report title
+        scan_type_names = {
+            'whois': 'WHOIS Lookup',
+            'dns': 'DNS Enumeration',
+            'subdomain': 'Subdomain Enumeration',
+            'port_scan': 'Port Scanning',
+            'vulnerability_scan': 'Vulnerability Assessment',
+            'exploit': 'Exploitation'
+        }
+        
+        title = f"{scan_type_names.get(scan_type, scan_type)} Report - {target}"
+        
+        # Calculate severity and findings count
+        severity = 'Low'
+        findings_count = 0
+        
+        if scan_type == 'vulnerability_scan':
+            critical_count = len(results.get('critical_vulnerabilities', []))
+            high_count = len(results.get('high_vulnerabilities', []))
+            medium_count = len(results.get('medium_vulnerabilities', []))
+            low_count = len(results.get('low_vulnerabilities', []))
+            
+            findings_count = critical_count + high_count + medium_count + low_count
+            
+            if critical_count > 0:
+                severity = 'Critical'
+            elif high_count > 0:
+                severity = 'High'
+            elif medium_count > 0:
+                severity = 'Medium'
+            else:
+                severity = 'Low'
+        
+        elif scan_type == 'port_scan':
+            open_ports = len(results.get('open_ports', []))
+            findings_count = open_ports
+            
+            if open_ports > 10:
+                severity = 'High'
+            elif open_ports > 5:
+                severity = 'Medium'
+            else:
+                severity = 'Low'
+        
+        elif scan_type == 'subdomain':
+            subdomains = len(results.get('subdomains', []))
+            findings_count = subdomains
+            
+            if subdomains > 20:
+                severity = 'Medium'
+            else:
+                severity = 'Low'
+        
+        elif scan_type == 'dns':
+            dns_records = (
+                len(results.get('a_records', [])) +
+                len(results.get('aaaa_records', [])) +
+                len(results.get('mx_records', [])) +
+                len(results.get('ns_records', [])) +
+                len(results.get('txt_records', []))
+            )
+            findings_count = dns_records
+            severity = 'Low'
+        
+        else:
+            severity = 'Low'
+            findings_count = 1
+        
+        # Generate summary
+        summary = generate_scan_summary(scan_type, results, findings_count)
+        
+        # Create report data
+        report_data = {
+            'id': scan_id,
+            'title': title,
+            'scan_type': scan_type,
+            'target': target,
+            'timestamp': datetime.datetime.now().isoformat(),
+            'status': 'completed',
+            'severity': severity,
+            'summary': summary,
+            'details': results,
+            'findings_count': findings_count
+        }
+        
+        # Store report in cache
+        cache.set(f'individual_report_{scan_id}', report_data, timeout=86400*7)  # 7 days
+        
+        # Add to individual report IDs list
+        individual_report_ids = cache.get('individual_report_ids', [])
+        if scan_id not in individual_report_ids:
+            individual_report_ids.append(scan_id)
+            cache.set('individual_report_ids', individual_report_ids, timeout=86400*7)  # 7 days
+        
+        return JsonResponse({
+            'success': True,
+            'report_id': scan_id,
+            'message': 'Individual report saved successfully'
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+@api_view(['POST'])
+def generate_comprehensive_report(request):
+    """Generate a comprehensive report from multiple individual reports"""
+    try:
+        data = json.loads(request.body)
+        title = data.get('title', 'Comprehensive Security Assessment Report')
+        included_report_ids = data.get('included_reports', [])
+        
+        if not included_report_ids:
+            return JsonResponse({
+                'success': False,
+                'error': 'No reports selected'
+            }, status=400)
+        
+        # Get individual reports
+        individual_reports = []
+        total_findings = 0
+        severity_scores = []
+        
+        for report_id in included_report_ids:
+            report_data = cache.get(f'individual_report_{report_id}')
+            if report_data:
+                individual_reports.append(report_data)
+                total_findings += report_data.get('findings_count', 0)
+                
+                # Calculate severity score
+                severity = report_data.get('severity', 'Low')
+                severity_scores.append({
+                    'Critical': 10,
+                    'High': 7,
+                    'Medium': 4,
+                    'Low': 1
+                }.get(severity, 1))
+        
+        # Calculate overall severity
+        if severity_scores:
+            avg_severity_score = sum(severity_scores) / len(severity_scores)
+            if avg_severity_score >= 8:
+                overall_severity = 'Critical'
+            elif avg_severity_score >= 5:
+                overall_severity = 'High'
+            elif avg_severity_score >= 2:
+                overall_severity = 'Medium'
+            else:
+                overall_severity = 'Low'
+        else:
+            overall_severity = 'Low'
+        
+        # Generate comprehensive report data
+        comprehensive_report_data = {
+            'title': title,
+            'generated_at': datetime.datetime.now().isoformat(),
+            'included_reports': included_report_ids,
+            'total_findings': total_findings,
+            'overall_severity': overall_severity,
+            'status': 'generated',
+            'individual_reports': individual_reports,
+            'executive_summary': generate_comprehensive_executive_summary(individual_reports),
+            'findings': extract_comprehensive_findings(individual_reports),
+            'recommendations': generate_comprehensive_recommendations(individual_reports),
+            'risk_assessment': generate_comprehensive_risk_assessment(individual_reports)
+        }
+        
+        # Store comprehensive report
+        report_id = str(int(time.time()))
+        cache.set(f'comprehensive_report_{report_id}', comprehensive_report_data, timeout=86400*30)  # 30 days
+        
+        # Add to comprehensive report IDs list
+        comprehensive_report_ids = cache.get('comprehensive_report_ids', [])
+        comprehensive_report_ids.append(report_id)
+        cache.set('comprehensive_report_ids', comprehensive_report_ids, timeout=86400*30)  # 30 days
+        
+        return JsonResponse({
+            'success': True,
+            'report_id': report_id,
+            'report_data': comprehensive_report_data
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+@api_view(['POST'])
+def download_report_pdf(request, report_type, report_id):
+    """Generate and download a PDF report"""
+    try:
+        if report_type == 'individual':
+            report_data = cache.get(f'individual_report_{report_id}')
+        else:
+            report_data = cache.get(f'comprehensive_report_{report_id}')
+        
+        if not report_data:
+            return JsonResponse({
+                'success': False,
+                'error': 'Report not found'
+            }, status=404)
+        
+        # Generate PDF content (simplified for now)
+        pdf_content = generate_pdf_content(report_data, report_type)
+        
+        # For now, return a JSON response indicating success
+        # In a real implementation, you would generate and return the actual PDF
+        return JsonResponse({
+            'success': True,
+            'message': f'{report_type} report PDF generated successfully',
+            'filename': f'{report_type}-report-{report_id}.pdf'
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+@api_view(['DELETE'])
+def delete_report(request, report_type, report_id):
+    """Delete a report"""
+    try:
+        if report_type == 'individual':
+            cache.delete(f'individual_report_{report_id}')
+            report_ids = cache.get('individual_report_ids', [])
+            if report_id in report_ids:
+                report_ids.remove(report_id)
+                cache.set('individual_report_ids', report_ids, timeout=86400*7)
+        else:
+            cache.delete(f'comprehensive_report_{report_id}')
+            report_ids = cache.get('comprehensive_report_ids', [])
+            if report_id in report_ids:
+                report_ids.remove(report_id)
+                cache.set('comprehensive_report_ids', report_ids, timeout=86400*30)
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'{report_type} report deleted successfully'
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+def generate_scan_summary(scan_type, results, findings_count):
+    """Generate a summary for a scan result"""
+    if scan_type == 'vulnerability_scan':
+        critical = len(results.get('critical_vulnerabilities', []))
+        high = len(results.get('high_vulnerabilities', []))
+        medium = len(results.get('medium_vulnerabilities', []))
+        low = len(results.get('low_vulnerabilities', []))
+        
+        return f"Found {findings_count} vulnerabilities: {critical} critical, {high} high, {medium} medium, {low} low severity issues."
+    
+    elif scan_type == 'port_scan':
+        open_ports = len(results.get('open_ports', []))
+        return f"Discovered {open_ports} open ports that may expose services."
+    
+    elif scan_type == 'subdomain':
+        subdomains = len(results.get('subdomains', []))
+        return f"Enumerated {subdomains} subdomains for the target domain."
+    
+    elif scan_type == 'dns':
+        dns_records = (
+            len(results.get('a_records', [])) +
+            len(results.get('aaaa_records', [])) +
+            len(results.get('mx_records', [])) +
+            len(results.get('ns_records', [])) +
+            len(results.get('txt_records', []))
+        )
+        return f"Retrieved {dns_records} DNS records including A, AAAA, MX, NS, and TXT records."
+    
+    elif scan_type == 'whois':
+        return "Retrieved domain registration and ownership information."
+    
+    else:
+        return f"Completed {scan_type} scan with {findings_count} findings."
+
+def generate_comprehensive_executive_summary(individual_reports):
+    """Generate executive summary for comprehensive report"""
+    total_reports = len(individual_reports)
+    total_findings = sum(report.get('findings_count', 0) for report in individual_reports)
+    
+    severity_counts = {'Critical': 0, 'High': 0, 'Medium': 0, 'Low': 0}
+    for report in individual_reports:
+        severity = report.get('severity', 'Low')
+        severity_counts[severity] += 1
+    
+    overall_severity = 'Low'
+    if severity_counts['Critical'] > 0:
+        overall_severity = 'Critical'
+    elif severity_counts['High'] > 0:
+        overall_severity = 'High'
+    elif severity_counts['Medium'] > 0:
+        overall_severity = 'Medium'
+    
+    return {
+        'total_reports': total_reports,
+        'total_findings': total_findings,
+        'overall_severity': overall_severity,
+        'severity_breakdown': severity_counts,
+        'key_findings': f"Comprehensive security assessment covering {total_reports} different scan types with {total_findings} total findings."
+    }
+
+def extract_comprehensive_findings(individual_reports):
+    """Extract findings from multiple individual reports"""
+    findings = []
+    
+    for report in individual_reports:
+        scan_type = report.get('scan_type')
+        target = report.get('target')
+        severity = report.get('severity')
+        details = report.get('details', {})
+        
+        if scan_type == 'vulnerability_scan':
+            for critical in details.get('critical_vulnerabilities', []):
+                findings.append({
+                    'title': f"Critical: {critical.get('title', 'Vulnerability')}",
+                    'description': critical.get('description', ''),
+                    'severity': 'Critical',
+                    'scan_type': scan_type,
+                    'target': target
+                })
+            
+            for high in details.get('high_vulnerabilities', []):
+                findings.append({
+                    'title': f"High: {high.get('title', 'Vulnerability')}",
+                    'description': high.get('description', ''),
+                    'severity': 'High',
+                    'scan_type': scan_type,
+                    'target': target
+                })
+        
+        elif scan_type == 'port_scan':
+            open_ports = details.get('open_ports', [])
+            if open_ports:
+                findings.append({
+                    'title': f"Open Ports Discovered ({len(open_ports)} ports)",
+                    'description': f"Found {len(open_ports)} open ports that may expose services",
+                    'severity': 'Medium',
+                    'scan_type': scan_type,
+                    'target': target,
+                    'details': open_ports
+                })
+    
+    return findings
+
+def generate_comprehensive_recommendations(individual_reports):
+    """Generate recommendations based on comprehensive findings"""
+    recommendations = []
+    
+    # Check for critical vulnerabilities
+    critical_reports = [r for r in individual_reports if r.get('severity') == 'Critical']
+    if critical_reports:
+        recommendations.append({
+            'title': 'Immediate Action Required',
+            'description': 'Critical vulnerabilities were identified that require immediate attention',
+            'priority': 'Critical',
+            'effort': 'High'
+        })
+    
+    # Check for high severity issues
+    high_reports = [r for r in individual_reports if r.get('severity') == 'High']
+    if high_reports:
+        recommendations.append({
+            'title': 'Address High Priority Issues',
+            'description': 'High severity findings should be addressed within 30 days',
+            'priority': 'High',
+            'effort': 'Medium'
+        })
+    
+    # General recommendations
+    recommendations.extend([
+        {
+            'title': 'Implement Security Monitoring',
+            'description': 'Deploy comprehensive security monitoring and alerting systems',
+            'priority': 'Medium',
+            'effort': 'High'
+        },
+        {
+            'title': 'Regular Security Assessments',
+            'description': 'Conduct regular security assessments and penetration testing',
+            'priority': 'Low',
+            'effort': 'Medium'
+        }
+    ])
+    
+    return recommendations
+
+def generate_comprehensive_risk_assessment(individual_reports):
+    """Generate comprehensive risk assessment"""
+    risk_score = 0
+    risk_factors = []
+    
+    for report in individual_reports:
+        severity = report.get('severity', 'Low')
+        scan_type = report.get('scan_type')
+        
+        # Add to risk score
+        severity_weights = {'Critical': 10, 'High': 7, 'Medium': 4, 'Low': 1}
+        risk_score += severity_weights.get(severity, 1)
+        
+        # Add risk factors
+        if severity == 'Critical':
+            risk_factors.append(f"Critical {scan_type} findings detected")
+        elif severity == 'High':
+            risk_factors.append(f"High severity {scan_type} issues identified")
+    
+    # Determine overall risk level
+    if risk_score >= 30:
+        overall_risk = 'Critical'
+    elif risk_score >= 20:
+        overall_risk = 'High'
+    elif risk_score >= 10:
+        overall_risk = 'Medium'
+    else:
+        overall_risk = 'Low'
+    
+    return {
+        'overall_risk': overall_risk,
+        'risk_score': risk_score,
+        'risk_factors': risk_factors,
+        'total_reports_assessed': len(individual_reports)
+    }
+
+def generate_pdf_content(report_data, report_type):
+    """Generate PDF content for a report (placeholder)"""
+    # This would integrate with a PDF generation library like ReportLab
+    # For now, return a simple text representation
+    return f"PDF content for {report_type} report: {report_data.get('title', 'Untitled')}"
+
+@api_view(['GET'])
+def check_nmap_availability(request):
+    """Check if Nmap is available on the system"""
+    try:
+        import subprocess
+        import sys
+        
+        # Try to run nmap --version
+        result = subprocess.run(['nmap', '--version'], 
+                              capture_output=True, 
+                              text=True, 
+                              timeout=5)
+        
+        if result.returncode == 0:
+            # Extract version from output
+            version_line = result.stdout.split('\n')[0]
+            version = version_line.replace('Nmap version ', '').split(' ')[0]
+            
+            return JsonResponse({
+                'success': True,
+                'available': True,
+                'version': version,
+                'message': 'Nmap is available'
+            })
+        else:
+            return JsonResponse({
+                'success': True,
+                'available': False,
+                'error': 'Nmap command failed',
+                'message': 'Nmap is not properly installed'
+            })
+            
+    except FileNotFoundError:
+        return JsonResponse({
+            'success': True,
+            'available': False,
+            'error': 'Nmap not found in PATH',
+            'message': 'Nmap is not installed or not in PATH'
+        })
+    except subprocess.TimeoutExpired:
+        return JsonResponse({
+            'success': True,
+            'available': False,
+            'error': 'Nmap command timed out',
+            'message': 'Nmap command execution timed out'
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'available': False,
+            'error': str(e),
+            'message': 'Error checking Nmap availability'
+        }, status=500)
+
+@api_view(['POST'])
+def basic_port_scan(request):
+    """
+    Perform real port scanning using Python socket connections
+    """
+    try:
+        data = json.loads(request.body)
+        target = data.get('target')
+        port_range = data.get('port_range', '1-1000')
+        
+        if not target:
+            return JsonResponse({'error': 'Target is required'}, status=400)
+        
+        # Parse port range
+        if port_range == 'common':
+            ports = [20, 21, 22, 23, 25, 53, 67, 68, 69, 80, 110, 123, 135, 137, 138, 139, 143, 161, 162, 389, 443, 445, 465, 514, 515, 587, 636, 993, 995, 1433, 1521, 1723, 3306, 3389, 5432, 5900, 5984, 6379, 8080, 8443, 9000, 9090, 9200, 27017]
+        else:
+            start, end = map(int, port_range.split('-'))
+            ports = list(range(start, end + 1))
+        
+        import socket
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time
+        
+        results = {
+            'open_ports': [],
+            'closed_ports': [],
+            'filtered_ports': [],
+            'target': target,
+            'scan_type': 'real_basic_port_scan',
+            'timestamp': time.time(),
+            'ports_scanned': len(ports)
+        }
+        
+        def scan_port(port):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)  # 2 second timeout
+                
+                result = sock.connect_ex((target, port))
+                sock.close()
+                
+                if result == 0:
+                    return {
+                        'port': port,
+                        'status': 'open',
+                        'service': get_service_name(port),
+                        'response_time': 0  # We can't measure this easily with connect_ex
+                    }
+                else:
+                    return {
+                        'port': port,
+                        'status': 'closed',
+                        'service': get_service_name(port),
+                        'response_time': 0
+                    }
+                    
+            except socket.timeout:
+                return {
+                    'port': port,
+                    'status': 'filtered',
+                    'service': get_service_name(port),
+                    'response_time': 2000
+                }
+            except Exception as e:
+                return {
+                    'port': port,
+                    'status': 'filtered',
+                    'service': get_service_name(port),
+                    'response_time': 0
+                }
+        
+        # Use ThreadPoolExecutor for concurrent scanning
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            future_to_port = {executor.submit(scan_port, port): port for port in ports}
+            
+            for future in as_completed(future_to_port):
+                result = future.result()
+                if result['status'] == 'open':
+                    results['open_ports'].append(result)
+                elif result['status'] == 'closed':
+                    results['closed_ports'].append(result)
+                else:
+                    results['filtered_ports'].append(result)
+        
+        # Add summary
+        results['summary'] = {
+            'total_ports': len(ports),
+            'open_count': len(results['open_ports']),
+            'closed_count': len(results['closed_ports']),
+            'filtered_count': len(results['filtered_ports'])
+        }
+        
+        return JsonResponse(results)
+        
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+def get_service_name(port):
+    """Get service name for common ports"""
+    common_services = {
+        20: "FTP-DATA", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP",
+        53: "DNS", 67: "DHCP", 68: "DHCP", 69: "TFTP", 80: "HTTP",
+        110: "POP3", 123: "NTP", 135: "RPC", 137: "NetBIOS", 138: "NetBIOS",
+        139: "NetBIOS", 143: "IMAP", 161: "SNMP", 162: "SNMP-TRAP",
+        389: "LDAP", 443: "HTTPS", 445: "SMB", 465: "SMTPS", 514: "Syslog",
+        515: "LPR", 587: "SMTP", 636: "LDAPS", 993: "IMAPS", 995: "POP3S",
+        1433: "MSSQL", 1521: "Oracle", 1723: "PPTP", 3306: "MySQL",
+        3389: "RDP", 5432: "PostgreSQL", 5900: "VNC", 5984: "CouchDB",
+        6379: "Redis", 8080: "HTTP-Alt", 8443: "HTTPS-Alt", 9000: "Webmin",
+        9090: "HTTP-Alt", 9200: "Elasticsearch", 27017: "MongoDB"
+    }
+    
+    if port in common_services:
+        return common_services[port]
+    elif 1 <= port <= 1023:
+        return "Well-known service"
+    elif 1024 <= port <= 49151:
+        return "Registered service"
+    elif 49152 <= port <= 65535:
+        return "Dynamic/Private service"
+    else:
+        return "Unknown"

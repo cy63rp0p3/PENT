@@ -30,6 +30,7 @@ import {
 import { useScrollbarAutoHide } from "@/hooks/useScrollbarAutoHide"
 import { Progress } from "@/components/ui/progress"
 import { useBackgroundScans } from "@/hooks/useBackgroundScans"
+import { useReportPromptContext } from "@/components/report-prompt-provider"
 
 // Lazy load the heavy scrollbar hook
 const LazyScrollbarHook = ({ children, timeout }: { children: any, timeout: number }) => {
@@ -46,12 +47,33 @@ export default function ReconnaissancePage() {
   const dnsScrollbar = useScrollbarAutoHide(2000)
   
   const { startScan, activeScans, cancelScan } = useBackgroundScans()
+  const { showReportPrompt } = useReportPromptContext()
 
   const stripProtocol = (input: string) => input.replace(/^https?:\/\//, "").replace(/\/$/, "")
 
   // Get the most recent scan for display
   const mostRecentScan = activeScans.length > 0 ? activeScans[activeScans.length - 1] : null
   const isScanning = activeScans.some(scan => scan.status === 'running')
+
+  // Check for completed scans and show report prompt
+  useEffect(() => {
+    activeScans.forEach(scan => {
+      if (scan.status === 'completed' && scan.results && !scan.reportPromptShown) {
+        // Mark this scan as having shown the prompt
+        scan.reportPromptShown = true
+        
+        // Show the report prompt
+        showReportPrompt({
+          scan_type: scan.scanType,
+          target: scan.target,
+          results: scan.results,
+          scan_id: scan.scanId,
+          timestamp: new Date().toISOString(),
+          status: 'completed'
+        })
+      }
+    })
+  }, [activeScans, showReportPrompt])
 
   // Subdomain tool actions
   const handleSubdomainEnum = async (view: string) => {
@@ -102,7 +124,7 @@ export default function ReconnaissancePage() {
         })
       }
     } catch (error) {
-      console.error('Failed to start WHOIS scan:', error)
+      console.error('Failed to start WHOIS lookup:', error)
     }
   }
 
@@ -121,11 +143,12 @@ export default function ReconnaissancePage() {
         startScan({
           scanId: data.scan_id,
           target: stripProtocol(target),
-          scanType: 'dns'
+          scanType: 'dns',
+          toolType: 'dns_lookup'
         })
       }
     } catch (error) {
-      console.error('Failed to start DNS scan:', error)
+      console.error('Failed to start DNS lookup:', error)
     }
   }
 
