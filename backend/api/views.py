@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from rest_framework import status
 import datetime
 from django.contrib.auth import authenticate
-from .models import UserProfile
+from .models import UserProfile, AuditLog
 from django.contrib.auth import get_user_model
 from pymetasploit3.msfrpc import MsfRpcClient
 import os
@@ -22,6 +22,9 @@ from django.http import JsonResponse
 import json
 import datetime
 import re
+from django.utils import timezone
+from django.db.models import Q, Count
+from django.core.paginator import Paginator
 
 # Import our services
 from .nmap_service import NmapService
@@ -33,6 +36,47 @@ zap_service = ZAPService()
 
 # In-memory storage for ZAP scan results (in production, use database)
 zap_scan_results = {}
+
+def log_audit_event(request, action, target=None, module='system', status='info', severity='low', details=None, metadata=None):
+    """
+    Utility function to log audit events
+    """
+    try:
+        user = request.user if hasattr(request, 'user') and request.user.is_authenticated else None
+        user_email = user.email if user else None
+        
+        # Get client IP address
+        ip_address = None
+        if hasattr(request, 'META'):
+            x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+            if x_forwarded_for:
+                ip_address = x_forwarded_for.split(',')[0].strip()
+            else:
+                ip_address = request.META.get('REMOTE_ADDR')
+        
+        # Get user agent
+        user_agent = request.META.get('HTTP_USER_AGENT', '') if hasattr(request, 'META') else ''
+        
+        # Get session ID
+        session_id = request.session.session_key if hasattr(request, 'session') else None
+        
+        AuditLog.objects.create(
+            user=user,
+            user_email=user_email,
+            action=action,
+            target=target,
+            module=module,
+            status=status,
+            severity=severity,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=details,
+            metadata=metadata,
+            session_id=session_id
+        )
+    except Exception as e:
+        # Don't let audit logging failures break the main functionality
+        print(f"Audit logging failed: {e}")
 
 # Create your views here.
 
@@ -77,6 +121,17 @@ def login(request):
             print(f'❌ Session verification failed for {user.email}')
             print(f'❌ Cache key {cache_key} not found')
 
+        # Log successful login
+        log_audit_event(
+            request=request,
+            action="User login successful",
+            target=user.email,
+            module="authentication",
+            status="success",
+            severity="low",
+            details=f"User {user.email} logged in successfully with role {role}"
+        )
+        
         response = Response({
             'user': {'id': str(user.id), 'email': user.email, 'role': role},
             'session': {'access_token': 'demo-token'},
@@ -85,6 +140,17 @@ def login(request):
         print(f'Login: {user.email} at {datetime.datetime.now()}')
         return response
     else:
+        # Log failed login attempt
+        log_audit_event(
+            request=request,
+            action="Failed login attempt",
+            target=email,
+            module="authentication",
+            status="failed",
+            severity="medium",
+            details=f"Failed login attempt for email: {email}"
+        )
+        
         print(f'❌ Login failed for: {email}')
         return Response({'error': 'Invalid login credentials'}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -101,6 +167,17 @@ def logout(request):
             return Response({'success': True})
         except get_user_model().DoesNotExist:
             pass
+    
+    # Log logout attempt
+    log_audit_event(
+        request=request,
+        action="User logout",
+        target=user_email or "unknown",
+        module="authentication",
+        status="success",
+        severity="low",
+        details=f"User logout attempt for: {user_email or 'unknown'}"
+    )
     
     return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1039,7 +1116,28 @@ def port_scan(request):
         )
         
         if 'error' in scan_result:
+            # Log failed port scan
+            log_audit_event(
+                request=request,
+                action="Port scan failed",
+                target=target,
+                module="scanning",
+                status="failed",
+                severity="medium",
+                details=f"Port scan failed for {target}: {scan_result['error']}"
+            )
             return Response({'error': scan_result['error']}, status=400)
+        
+        # Log successful port scan initiation
+        log_audit_event(
+            request=request,
+            action="Port scan initiated",
+            target=target,
+            module="scanning",
+            status="success",
+            severity="low",
+            details=f"Port scan started for {target} with scan type {scan_type}, ports {options.get('portRange', '1-1000')}"
+        )
         
         return Response(scan_result)
         
@@ -2411,6 +2509,27 @@ def get_individual_report_detail(request, report_id):
             'error': str(e)
         }, status=500)
 
+@api_view(['GET'])
+def get_comprehensive_report_detail(request, report_id):
+    """Get detailed comprehensive report data"""
+    try:
+        report_data = cache.get(f'comprehensive_report_{report_id}')
+        if not report_data:
+            return JsonResponse({
+                'success': False,
+                'error': 'Comprehensive report not found'
+            }, status=404)
+        
+        return JsonResponse({
+            'success': True,
+            'report': report_data
+        })
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
 @api_view(['POST'])
 def save_individual_report(request):
     """Save an individual scan result as a report"""
@@ -2624,16 +2743,22 @@ def download_report_pdf(request, report_type, report_id):
                 'error': 'Report not found'
             }, status=404)
         
-        # Generate PDF content (simplified for now)
+        # Generate PDF content
         pdf_content = generate_pdf_content(report_data, report_type)
         
-        # For now, return a JSON response indicating success
-        # In a real implementation, you would generate and return the actual PDF
-        return JsonResponse({
-            'success': True,
-            'message': f'{report_type} report PDF generated successfully',
-            'filename': f'{report_type}-report-{report_id}.pdf'
-        })
+        # Check if PDF generation was successful
+        if isinstance(pdf_content, str) and pdf_content.startswith('Error generating PDF:'):
+            return JsonResponse({
+                'success': False,
+                'error': pdf_content
+            }, status=500)
+        
+        # Return the PDF as a file response
+        from django.http import HttpResponse
+        response = HttpResponse(pdf_content, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{report_type}-report-{report_id}.pdf"'
+        return response
+        
     except Exception as e:
         return JsonResponse({
             'success': False,
@@ -2771,88 +2896,899 @@ def extract_comprehensive_findings(individual_reports):
     return findings
 
 def generate_comprehensive_recommendations(individual_reports):
-    """Generate recommendations based on comprehensive findings"""
+    """Generate data-driven recommendations based on comprehensive findings"""
     recommendations = []
     
-    # Check for critical vulnerabilities
-    critical_reports = [r for r in individual_reports if r.get('severity') == 'Critical']
-    if critical_reports:
+    # Analyze scan types and findings
+    scan_types = {}
+    total_findings = 0
+    critical_count = 0
+    high_count = 0
+    medium_count = 0
+    
+    for report in individual_reports:
+        scan_type = report.get('scan_type', 'unknown')
+        severity = report.get('severity', 'Low')
+        findings_count = report.get('findings_count', 0)
+        
+        if scan_type not in scan_types:
+            scan_types[scan_type] = {
+                'count': 0,
+                'findings': 0,
+                'severities': {'Critical': 0, 'High': 0, 'Medium': 0, 'Low': 0}
+            }
+        
+        scan_types[scan_type]['count'] += 1
+        scan_types[scan_type]['findings'] += findings_count
+        scan_types[scan_type]['severities'][severity] += 1
+        
+        total_findings += findings_count
+        
+        if severity == 'Critical':
+            critical_count += 1
+        elif severity == 'High':
+            high_count += 1
+        elif severity == 'Medium':
+            medium_count += 1
+    
+    # Critical vulnerabilities - Immediate action
+    if critical_count > 0:
         recommendations.append({
             'title': 'Immediate Action Required',
-            'description': 'Critical vulnerabilities were identified that require immediate attention',
+            'description': f'Critical vulnerabilities were identified in {critical_count} reports that require immediate attention',
             'priority': 'Critical',
-            'effort': 'High'
+            'effort': 'High',
+            'basis': f'Based on {critical_count} critical severity findings across {len(individual_reports)} scan reports'
         })
     
-    # Check for high severity issues
-    high_reports = [r for r in individual_reports if r.get('severity') == 'High']
-    if high_reports:
+    # High severity issues - High priority
+    if high_count > 0:
         recommendations.append({
             'title': 'Address High Priority Issues',
-            'description': 'High severity findings should be addressed within 30 days',
+            'description': f'High severity findings in {high_count} reports should be addressed within 30 days',
             'priority': 'High',
-            'effort': 'Medium'
+            'effort': 'Medium',
+            'basis': f'Based on {high_count} high severity findings with {total_findings} total issues discovered'
         })
     
-    # General recommendations
-    recommendations.extend([
-        {
-            'title': 'Implement Security Monitoring',
-            'description': 'Deploy comprehensive security monitoring and alerting systems',
-            'priority': 'Medium',
-            'effort': 'High'
-        },
-        {
-            'title': 'Regular Security Assessments',
-            'description': 'Conduct regular security assessments and penetration testing',
+    # Port scan specific recommendations
+    if 'port_scan' in scan_types or 'basic_port_scan' in scan_types:
+        port_scan_data = scan_types.get('port_scan', scan_types.get('basic_port_scan', {}))
+        if port_scan_data.get('findings', 0) > 10:
+            recommendations.append({
+                'title': 'Reduce Attack Surface',
+                'description': f'Close unnecessary open ports ({port_scan_data["findings"]} currently open)',
+                'priority': 'Medium',
+                'effort': 'Medium',
+                'basis': f'Based on port scan revealing {port_scan_data["findings"]} open ports'
+            })
+        elif port_scan_data.get('findings', 0) > 0:
+            recommendations.append({
+                'title': 'Review Open Ports',
+                'description': f'Review and secure {port_scan_data["findings"]} open ports',
+                'priority': 'Medium',
+                'effort': 'Low',
+                'basis': f'Based on port scan revealing {port_scan_data["findings"]} open ports'
+            })
+    
+    # Subdomain enumeration recommendations
+    if 'subdomain' in scan_types:
+        subdomain_data = scan_types['subdomain']
+        if subdomain_data.get('findings', 0) > 20:
+            recommendations.append({
+                'title': 'Subdomain Security Review',
+                'description': f'Review security of {subdomain_data["findings"]} discovered subdomains',
+                'priority': 'Medium',
+                'effort': 'High',
+                'basis': f'Based on subdomain enumeration discovering {subdomain_data["findings"]} subdomains'
+            })
+        elif subdomain_data.get('findings', 0) > 0:
+            recommendations.append({
+                'title': 'Subdomain Monitoring',
+                'description': f'Implement monitoring for {subdomain_data["findings"]} discovered subdomains',
+                'priority': 'Low',
+                'effort': 'Medium',
+                'basis': f'Based on subdomain enumeration discovering {subdomain_data["findings"]} subdomains'
+            })
+    
+    # DNS enumeration recommendations
+    if 'dns' in scan_types:
+        dns_data = scan_types['dns']
+        if dns_data.get('findings', 0) > 10:
+            recommendations.append({
+                'title': 'DNS Security Hardening',
+                'description': f'Review and secure {dns_data["findings"]} DNS records',
+                'priority': 'Medium',
+                'effort': 'Medium',
+                'basis': f'Based on DNS enumeration revealing {dns_data["findings"]} DNS records'
+            })
+    
+    # Vulnerability scan specific recommendations
+    if 'vulnerability_scan' in scan_types:
+        vuln_data = scan_types['vulnerability_scan']
+        if vuln_data.get('severities', {}).get('Critical', 0) > 0:
+            recommendations.append({
+                'title': 'Patch Critical Vulnerabilities',
+                'description': f'Apply patches for {vuln_data["severities"]["Critical"]} critical vulnerabilities immediately',
+                'priority': 'Critical',
+                'effort': 'High',
+                'basis': f'Based on vulnerability scan detecting {vuln_data["severities"]["Critical"]} critical vulnerabilities'
+            })
+        
+        if vuln_data.get('severities', {}).get('High', 0) > 0:
+            recommendations.append({
+                'title': 'Address High-Risk Vulnerabilities',
+                'description': f'Fix {vuln_data["severities"]["High"]} high-risk vulnerabilities within 30 days',
+                'priority': 'High',
+                'effort': 'Medium',
+                'basis': f'Based on vulnerability scan detecting {vuln_data["severities"]["High"]} high-risk vulnerabilities'
+            })
+    
+    # Information disclosure recommendations
+    if 'whois' in scan_types:
+        recommendations.append({
+            'title': 'Review Public Information',
+            'description': 'Review and minimize sensitive information in public WHOIS records',
             'priority': 'Low',
-            'effort': 'Medium'
-        }
-    ])
+            'effort': 'Low',
+            'basis': 'Based on WHOIS information gathering revealing public domain details'
+        })
+    
+    # General recommendations based on overall findings
+    if total_findings > 50:
+        recommendations.append({
+            'title': 'Comprehensive Security Overhaul',
+            'description': f'Implement comprehensive security improvements across {len(individual_reports)} assessed areas',
+            'priority': 'High',
+            'effort': 'High',
+            'basis': f'Based on {total_findings} total findings across {len(individual_reports)} scan types'
+        })
+    elif total_findings > 20:
+        recommendations.append({
+            'title': 'Enhanced Security Monitoring',
+            'description': 'Implement enhanced security monitoring and alerting systems',
+            'priority': 'Medium',
+            'effort': 'High',
+            'basis': f'Based on {total_findings} findings requiring ongoing monitoring'
+        })
+    elif total_findings > 0:
+        recommendations.append({
+            'title': 'Implement Security Monitoring',
+            'description': 'Deploy basic security monitoring and alerting systems',
+            'priority': 'Medium',
+            'effort': 'Medium',
+            'basis': f'Based on {total_findings} findings requiring monitoring'
+        })
+    
+    # Regular assessment recommendation (always include)
+    recommendations.append({
+        'title': 'Regular Security Assessments',
+        'description': 'Conduct regular security assessments and penetration testing',
+        'priority': 'Low',
+        'effort': 'Medium',
+        'basis': 'Best practice recommendation for ongoing security maintenance'
+    })
     
     return recommendations
 
 def generate_comprehensive_risk_assessment(individual_reports):
-    """Generate comprehensive risk assessment"""
+    """Generate comprehensive risk assessment with enhanced algorithm"""
     risk_score = 0
     risk_factors = []
+    scan_type_weights = {
+        'vulnerability_scan': 1.5,  # Higher weight for vulnerability scans
+        'port_scan': 1.2,          # Moderate weight for port scans
+        'basic_port_scan': 1.2,    # Same as port scan
+        'whois': 0.8,              # Lower weight for info gathering
+        'dns': 0.8,                # Lower weight for info gathering
+        'subdomain': 0.9,          # Moderate weight for subdomain enumeration
+        'exploit': 2.0             # Highest weight for exploitation
+    }
+    
+    severity_weights = {'Critical': 10, 'High': 7, 'Medium': 4, 'Low': 1}
+    total_findings = 0
+    critical_count = 0
+    high_count = 0
     
     for report in individual_reports:
         severity = report.get('severity', 'Low')
-        scan_type = report.get('scan_type')
+        scan_type = report.get('scan_type', 'unknown')
+        findings_count = report.get('findings_count', 0)
         
-        # Add to risk score
-        severity_weights = {'Critical': 10, 'High': 7, 'Medium': 4, 'Low': 1}
-        risk_score += severity_weights.get(severity, 1)
+        # Get scan type weight (default to 1.0 if not found)
+        scan_weight = scan_type_weights.get(scan_type, 1.0)
         
-        # Add risk factors
+        # Calculate weighted risk score for this report
+        base_score = severity_weights.get(severity, 1)
+        weighted_score = base_score * scan_weight
+        
+        # Add findings count multiplier (more findings = higher risk)
+        findings_multiplier = min(1 + (findings_count * 0.1), 2.0)  # Cap at 2x
+        final_score = weighted_score * findings_multiplier
+        
+        risk_score += final_score
+        total_findings += findings_count
+        
+        # Track critical and high findings
         if severity == 'Critical':
-            risk_factors.append(f"Critical {scan_type} findings detected")
+            critical_count += 1
+            risk_factors.append(f"Critical {scan_type.replace('_', ' ').title()} findings detected ({findings_count} issues)")
         elif severity == 'High':
-            risk_factors.append(f"High severity {scan_type} issues identified")
+            high_count += 1
+            risk_factors.append(f"High severity {scan_type.replace('_', ' ').title()} issues identified ({findings_count} issues)")
+        elif severity == 'Medium':
+            risk_factors.append(f"Medium severity {scan_type.replace('_', ' ').title()} findings ({findings_count} issues)")
+    
+    # Enhanced risk level determination with dynamic thresholds
+    num_reports = len(individual_reports)
+    
+    # Adjust thresholds based on number of reports
+    if num_reports <= 2:
+        critical_threshold = 25
+        high_threshold = 15
+        medium_threshold = 8
+    elif num_reports <= 5:
+        critical_threshold = 35
+        high_threshold = 25
+        medium_threshold = 15
+    else:
+        critical_threshold = 45
+        high_threshold = 35
+        medium_threshold = 25
     
     # Determine overall risk level
-    if risk_score >= 30:
+    if risk_score >= critical_threshold or critical_count >= 2:
         overall_risk = 'Critical'
-    elif risk_score >= 20:
+    elif risk_score >= high_threshold or high_count >= 3:
         overall_risk = 'High'
-    elif risk_score >= 10:
+    elif risk_score >= medium_threshold:
         overall_risk = 'Medium'
     else:
         overall_risk = 'Low'
     
-    return {
+    # Generate detailed risk assessment
+    risk_assessment = {
         'overall_risk': overall_risk,
-        'risk_score': risk_score,
+        'risk_score': round(risk_score, 2),
         'risk_factors': risk_factors,
-        'total_reports_assessed': len(individual_reports)
+        'total_reports_assessed': num_reports,
+        'total_findings': total_findings,
+        'critical_findings_count': critical_count,
+        'high_findings_count': high_count,
+        'risk_breakdown': {
+            'critical_reports': critical_count,
+            'high_reports': high_count,
+            'medium_reports': sum(1 for r in individual_reports if r.get('severity') == 'Medium'),
+            'low_reports': sum(1 for r in individual_reports if r.get('severity') == 'Low')
+        },
+        'assessment_methodology': f"Risk calculated using weighted severity scores with scan type multipliers. Thresholds adjusted for {num_reports} reports."
     }
+    
+    return risk_assessment
 
 def generate_pdf_content(report_data, report_type):
-    """Generate PDF content for a report (placeholder)"""
-    # This would integrate with a PDF generation library like ReportLab
-    # For now, return a simple text representation
-    return f"PDF content for {report_type} report: {report_data.get('title', 'Untitled')}"
+    """Generate PDF content for a report using ReportLab"""
+    try:
+        from reportlab.lib.pagesizes import letter, A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.lib import colors
+        from io import BytesIO
+        import json
+        from datetime import datetime
+        
+        # Create a buffer to store the PDF
+        buffer = BytesIO()
+        
+        # Create the PDF document with margins
+        doc = SimpleDocTemplate(buffer, pagesize=A4, 
+                              leftMargin=0.75*inch, rightMargin=0.75*inch,
+                              topMargin=0.75*inch, bottomMargin=0.75*inch)
+        story = []
+        
+        # Get styles
+        styles = getSampleStyleSheet()
+        
+        # Custom styles for better readability
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=20,
+            spaceAfter=30,
+            alignment=1,  # Center alignment
+            fontName='Helvetica-Bold',
+            textColor=colors.darkblue
+        )
+        
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=14,
+            spaceAfter=12,
+            spaceBefore=20,
+            fontName='Helvetica-Bold',
+            textColor=colors.darkblue
+        )
+        
+        subheading_style = ParagraphStyle(
+            'SubHeading',
+            parent=styles['Heading3'],
+            fontSize=12,
+            spaceAfter=8,
+            spaceBefore=12,
+            fontName='Helvetica-Bold',
+            textColor=colors.darkgreen
+        )
+        
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontSize=10,
+            spaceAfter=6,
+            leading=14
+        )
+        
+        # Header with logo and title
+        story.append(Paragraph("🔒 SECURITY ASSESSMENT REPORT", title_style))
+        story.append(Spacer(1, 20))
+        
+        # Report Overview Section
+        story.append(Paragraph("📋 REPORT OVERVIEW", heading_style))
+        
+        # Handle different report types
+        if report_type == 'comprehensive':
+            # Format timestamp for comprehensive reports
+            timestamp = report_data.get('generated_at', 'N/A')
+            if timestamp != 'N/A':
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime("%B %d, %Y at %I:%M %p UTC")
+                except:
+                    formatted_time = timestamp
+            else:
+                formatted_time = 'N/A'
+            
+            overview_data = [
+                ['Field', 'Value'],
+                ['Report Title', report_data.get('title', 'Untitled')],
+                ['Report Type', 'Comprehensive Security Assessment'],
+                ['Overall Severity', report_data.get('overall_severity', 'N/A').upper()],
+                ['Total Findings', str(report_data.get('total_findings', 0))],
+                ['Included Reports', str(len(report_data.get('included_reports', [])))],
+                ['Generated On', formatted_time]
+            ]
+        else:
+            # Individual report format
+            timestamp = report_data.get('timestamp', 'N/A')
+            if timestamp != 'N/A':
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime("%B %d, %Y at %I:%M %p UTC")
+                except:
+                    formatted_time = timestamp
+            else:
+                formatted_time = 'N/A'
+            
+            overview_data = [
+                ['Field', 'Value'],
+                ['Report Title', report_data.get('title', 'Untitled')],
+                ['Target', report_data.get('target', 'N/A')],
+                ['Scan Type', report_data.get('scan_type', 'N/A').replace('_', ' ').title()],
+                ['Severity Level', report_data.get('severity', 'N/A').upper()],
+                ['Total Findings', str(report_data.get('findings_count', 0))],
+                ['Generated On', formatted_time]
+            ]
+        
+        overview_table = Table(overview_data, colWidths=[2.2*inch, 4.3*inch])
+        overview_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 11),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey])
+        ]))
+        story.append(overview_table)
+        story.append(Spacer(1, 25))
+        
+        # Handle different content sections based on report type
+        if report_type == 'comprehensive':
+            # Comprehensive Report Executive Summary
+            if report_data.get('executive_summary'):
+                story.append(Paragraph("📊 EXECUTIVE SUMMARY", heading_style))
+                story.append(Paragraph(report_data['executive_summary'].get('key_findings', 'No summary available'), normal_style))
+                story.append(Spacer(1, 20))
+            
+            # Comprehensive Report Statistics
+            if report_data.get('executive_summary'):
+                story.append(Paragraph("📈 COMPREHENSIVE STATISTICS", heading_style))
+                
+                stats_data = [
+                    ['Metric', 'Count'],
+                    ['Total Reports Combined', str(report_data['executive_summary'].get('total_reports', 0))],
+                    ['Total Findings', str(report_data['executive_summary'].get('total_findings', 0))],
+                    ['Overall Severity', report_data.get('overall_severity', 'N/A').upper()]
+                ]
+                
+                # Add severity breakdown if available
+                severity_breakdown = report_data['executive_summary'].get('severity_breakdown', {})
+                if severity_breakdown:
+                    stats_data.extend([
+                        ['Critical Findings', str(severity_breakdown.get('Critical', 0))],
+                        ['High Findings', str(severity_breakdown.get('High', 0))],
+                        ['Medium Findings', str(severity_breakdown.get('Medium', 0))],
+                        ['Low Findings', str(severity_breakdown.get('Low', 0))]
+                    ])
+                
+                stats_table = Table(stats_data, colWidths=[3*inch, 3.5*inch])
+                stats_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey])
+                ]))
+                story.append(stats_table)
+                story.append(Spacer(1, 25))
+            
+            # Included Reports List
+            if report_data.get('included_reports'):
+                story.append(Paragraph("📋 INCLUDED REPORTS", heading_style))
+                story.append(Paragraph("This comprehensive report combines the following individual reports:", normal_style))
+                
+                included_reports_data = [['Report ID', 'Type']]
+                for report_id in report_data['included_reports']:
+                    # Try to get report details from cache
+                    individual_report = cache.get(f'individual_report_{report_id}')
+                    if individual_report:
+                        scan_type = individual_report.get('scan_type', 'Unknown').replace('_', ' ').title()
+                        # Truncate long report IDs for better display
+                        display_id = report_id[:20] + '...' if len(report_id) > 20 else report_id
+                        included_reports_data.append([display_id, scan_type])
+                    else:
+                        display_id = report_id[:20] + '...' if len(report_id) > 20 else report_id
+                        included_reports_data.append([display_id, 'Unknown'])
+                
+                reports_table = Table(included_reports_data, colWidths=[3.5*inch, 3*inch])
+                reports_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.darkgreen),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 9),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.lightgreen),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgreen]),
+                    ('FONTSIZE', (0, 1), (-1, -1), 8),
+                    ('WORDWRAP', (0, 0), (-1, -1), True),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 6)
+                ]))
+                story.append(reports_table)
+                
+                # Add note about truncated IDs if any reports have long IDs
+                long_ids = [rid for rid in report_data['included_reports'] if len(rid) > 20]
+                if long_ids:
+                    story.append(Spacer(1, 10))
+                    story.append(Paragraph("Note: Long report IDs have been truncated for display. Full IDs are available in the web interface.", 
+                                          ParagraphStyle('Note', fontSize=7, textColor=colors.grey)))
+                
+                story.append(Spacer(1, 25))
+            
+            # Comprehensive Findings
+            if report_data.get('findings'):
+                story.append(Paragraph("🔍 COMPREHENSIVE FINDINGS", heading_style))
+                for i, finding in enumerate(report_data['findings'][:20], 1):  # Limit to first 20 findings
+                    story.append(Paragraph(f"<b>{i}. {finding.get('title', 'Finding')}</b>", subheading_style))
+                    story.append(Paragraph(f"Severity: {finding.get('severity', 'Unknown')}", normal_style))
+                    story.append(Paragraph(f"Description: {finding.get('description', 'No description available')}", normal_style))
+                    if finding.get('recommendation'):
+                        story.append(Paragraph(f"Recommendation: {finding.get('recommendation')}", normal_style))
+                    story.append(Spacer(1, 10))
+                
+                if len(report_data['findings']) > 20:
+                    story.append(Paragraph(f"... and {len(report_data['findings']) - 20} more findings", normal_style))
+                story.append(Spacer(1, 20))
+            
+            # Risk Assessment
+            if report_data.get('risk_assessment'):
+                story.append(Paragraph("⚠️ RISK ASSESSMENT", heading_style))
+                
+                risk_data = report_data['risk_assessment']
+                overall_risk = risk_data.get('overall_risk', 'Risk assessment not available')
+                
+                # Display overall risk with color coding
+                risk_color = colors.red if overall_risk == 'Critical' else \
+                           colors.orange if overall_risk == 'High' else \
+                           colors.yellow if overall_risk == 'Medium' else colors.green
+                
+                story.append(Paragraph(f"Overall Risk Level: <b>{overall_risk}</b>", 
+                                      ParagraphStyle('RiskLevel', fontSize=12, textColor=risk_color)))
+                
+                # Display risk score and methodology
+                if risk_data.get('risk_score'):
+                    story.append(Paragraph(f"Risk Score: {risk_data['risk_score']}", normal_style))
+                
+                if risk_data.get('assessment_methodology'):
+                    story.append(Paragraph(f"Methodology: {risk_data['assessment_methodology']}", normal_style))
+                
+                # Display risk breakdown if available
+                if risk_data.get('risk_breakdown'):
+                    breakdown = risk_data['risk_breakdown']
+                    story.append(Paragraph("Risk Breakdown:", normal_style))
+                    story.append(Paragraph(f"• Critical Reports: {breakdown.get('critical_reports', 0)}", normal_style))
+                    story.append(Paragraph(f"• High Reports: {breakdown.get('high_reports', 0)}", normal_style))
+                    story.append(Paragraph(f"• Medium Reports: {breakdown.get('medium_reports', 0)}", normal_style))
+                    story.append(Paragraph(f"• Low Reports: {breakdown.get('low_reports', 0)}", normal_style))
+                
+                story.append(Spacer(1, 20))
+            
+            # Recommendations
+            if report_data.get('recommendations'):
+                story.append(Paragraph("💡 RECOMMENDATIONS", heading_style))
+                for i, rec in enumerate(report_data['recommendations'][:10], 1):  # Limit to first 10 recommendations
+                    story.append(Paragraph(f"<b>{i}. {rec.get('title', 'Recommendation')}</b>", subheading_style))
+                    story.append(Paragraph(rec.get('description', 'No description available'), normal_style))
+                    
+                    # Show basis for recommendation if available
+                    if rec.get('basis'):
+                        story.append(Paragraph(f"<i>Basis: {rec.get('basis')}</i>", 
+                                              ParagraphStyle('Basis', fontSize=8, textColor=colors.grey)))
+                    
+                    # Show priority and effort if available
+                    if rec.get('priority') or rec.get('effort'):
+                        priority_text = f"Priority: {rec.get('priority', 'N/A')}"
+                        effort_text = f"Effort: {rec.get('effort', 'N/A')}"
+                        story.append(Paragraph(f"<small>{priority_text} | {effort_text}</small>", 
+                                              ParagraphStyle('Meta', fontSize=7, textColor=colors.darkgrey)))
+                    
+                    story.append(Spacer(1, 8))
+                
+                if len(report_data['recommendations']) > 10:
+                    story.append(Paragraph(f"... and {len(report_data['recommendations']) - 10} more recommendations", normal_style))
+                story.append(Spacer(1, 20))
+        else:
+            # Individual Report Executive Summary
+            if report_data.get('summary'):
+                story.append(Paragraph("📊 EXECUTIVE SUMMARY", heading_style))
+                story.append(Paragraph(report_data['summary'], normal_style))
+                story.append(Spacer(1, 20))
+        
+        # Detailed Findings
+        if report_data.get('details'):
+            story.append(Paragraph("🔍 DETAILED FINDINGS", heading_style))
+            
+            details = report_data['details']
+            scan_type = report_data.get('scan_type', '')
+            
+            # Handle different scan types with better organization
+            if 'port_scan' in scan_type or 'basic_port_scan' in scan_type:
+                story.append(Paragraph("🌐 PORT SCAN RESULTS", subheading_style))
+                
+                # Port Scan Summary
+                if details.get('summary'):
+                    summary = details['summary']
+                    story.append(Paragraph("📈 Scan Statistics", subheading_style))
+                    
+                    summary_data = [
+                        ['Metric', 'Count', 'Percentage'],
+                        ['Total Ports Scanned', str(summary.get('total_ports', 0)), '100%'],
+                        ['Open Ports', str(summary.get('open_count', 0)), f"{round((summary.get('open_count', 0) / summary.get('total_ports', 1)) * 100, 1)}%"],
+                        ['Closed Ports', str(summary.get('closed_count', 0)), f"{round((summary.get('closed_count', 0) / summary.get('total_ports', 1)) * 100, 1)}%"],
+                        ['Filtered Ports', str(summary.get('filtered_count', 0)), f"{round((summary.get('filtered_count', 0) / summary.get('total_ports', 1)) * 100, 1)}%"]
+                    ]
+                    
+                    summary_table = Table(summary_data, colWidths=[2.5*inch, 1.5*inch, 1.5*inch])
+                    summary_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.darkgreen),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 10),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.lightgreen),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')
+                    ]))
+                    story.append(summary_table)
+                    story.append(Spacer(1, 15))
+                
+                # Open Ports (Most Important)
+                if details.get('open_ports') and len(details['open_ports']) > 0:
+                    story.append(Paragraph("🚨 OPEN PORTS (CRITICAL FINDINGS)", subheading_style))
+                    story.append(Paragraph("These ports are accessible and may expose services:", normal_style))
+                    
+                    open_ports_data = [['Port', 'Service', 'Status', 'Response Time']]
+                    for port in details['open_ports']:
+                        response_time = f"{port.get('response_time', 0)}ms" if port.get('response_time', 0) > 0 else 'N/A'
+                        open_ports_data.append([
+                            str(port.get('port', 'N/A')),
+                            port.get('service', 'Unknown'),
+                            'OPEN',
+                            response_time
+                        ])
+                    
+                    ports_table = Table(open_ports_data, colWidths=[1*inch, 2*inch, 1*inch, 1.5*inch])
+                    ports_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.red),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 9),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.lightcoral),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')
+                    ]))
+                    story.append(ports_table)
+                    story.append(Spacer(1, 15))
+                else:
+                    story.append(Paragraph("✅ No open ports detected - Good security posture!", normal_style))
+                    story.append(Spacer(1, 10))
+                
+                # Closed Ports (Limited display)
+                if details.get('closed_ports') and len(details['closed_ports']) > 0:
+                    story.append(Paragraph("🔒 CLOSED PORTS (SECURE)", subheading_style))
+                    story.append(Paragraph(f"Found {len(details['closed_ports'])} closed ports. Showing first 10 examples:", normal_style))
+                    
+                    closed_ports_data = [['Port', 'Service', 'Status']]
+                    for port in details['closed_ports'][:10]:  # Show only first 10
+                        closed_ports_data.append([
+                            str(port.get('port', 'N/A')),
+                            port.get('service', 'Unknown'),
+                            'CLOSED'
+                        ])
+                    
+                    if len(details['closed_ports']) > 10:
+                        closed_ports_data.append(['...', f'and {len(details["closed_ports"]) - 10} more', 'CLOSED'])
+                    
+                    closed_table = Table(closed_ports_data, colWidths=[1.5*inch, 2.5*inch, 1.5*inch])
+                    closed_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.darkgrey),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 9),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')
+                    ]))
+                    story.append(closed_table)
+                    story.append(Spacer(1, 15))
+                
+                # Filtered Ports (if any)
+                if details.get('filtered_ports') and len(details['filtered_ports']) > 0:
+                    story.append(Paragraph("🛡️ FILTERED PORTS", subheading_style))
+                    story.append(Paragraph(f"Found {len(details['filtered_ports'])} filtered ports (likely blocked by firewall):", normal_style))
+                    
+                    filtered_ports_data = [['Port', 'Service', 'Status']]
+                    for port in details['filtered_ports'][:10]:  # Show only first 10
+                        filtered_ports_data.append([
+                            str(port.get('port', 'N/A')),
+                            port.get('service', 'Unknown'),
+                            'FILTERED'
+                        ])
+                    
+                    if len(details['filtered_ports']) > 10:
+                        filtered_ports_data.append(['...', f'and {len(details["filtered_ports"]) - 10} more', 'FILTERED'])
+                    
+                    filtered_table = Table(filtered_ports_data, colWidths=[1.5*inch, 2.5*inch, 1.5*inch])
+                    filtered_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.orange),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 9),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.lightyellow),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')
+                    ]))
+                    story.append(filtered_table)
+                    story.append(Spacer(1, 15))
+            
+            elif 'vulnerability_scan' in scan_type:
+                story.append(Paragraph("🔍 VULNERABILITY SCAN RESULTS", subheading_style))
+                
+                if details.get('critical_vulnerabilities'):
+                    story.append(Paragraph("🚨 CRITICAL VULNERABILITIES", subheading_style))
+                    for i, vuln in enumerate(details['critical_vulnerabilities'][:10], 1):
+                        story.append(Paragraph(f"<b>{i}. {vuln.get('name', 'Unknown Vulnerability')}</b>", normal_style))
+                        story.append(Paragraph(f"Description: {vuln.get('description', 'No description available')}", normal_style))
+                        if vuln.get('cwe'):
+                            story.append(Paragraph(f"CWE: {vuln.get('cwe')}", normal_style))
+                        if vuln.get('cvss'):
+                            story.append(Paragraph(f"CVSS Score: {vuln.get('cvss')}", normal_style))
+                        story.append(Spacer(1, 8))
+                
+                if details.get('high_vulnerabilities'):
+                    story.append(Paragraph("⚠️ HIGH VULNERABILITIES", subheading_style))
+                    for i, vuln in enumerate(details['high_vulnerabilities'][:10], 1):
+                        story.append(Paragraph(f"<b>{i}. {vuln.get('name', 'Unknown Vulnerability')}</b>", normal_style))
+                        story.append(Paragraph(f"Description: {vuln.get('description', 'No description available')}", normal_style))
+                        if vuln.get('cwe'):
+                            story.append(Paragraph(f"CWE: {vuln.get('cwe')}", normal_style))
+                        if vuln.get('cvss'):
+                            story.append(Paragraph(f"CVSS Score: {vuln.get('cvss')}", normal_style))
+                        story.append(Spacer(1, 8))
+            
+            elif 'subdomain' in scan_type:
+                story.append(Paragraph("🌐 SUBDOMAIN ENUMERATION RESULTS", subheading_style))
+                
+                # Check if we have subdomains in the data (handle different data structures)
+                subdomains = []
+                if details.get('subdomains'):
+                    subdomains = details['subdomains']
+                elif details.get('data', {}).get('subdomains'):
+                    subdomains = details['data']['subdomains']
+                
+                if isinstance(subdomains, list) and len(subdomains) > 0:
+                    story.append(Paragraph(f"📊 Subdomain Summary", subheading_style))
+                    story.append(Paragraph(f"Total subdomains discovered: {len(subdomains)}", normal_style))
+                    story.append(Spacer(1, 15))
+                    
+                    # Create subdomain table
+                    story.append(Paragraph("🔍 DISCOVERED SUBDOMAINS", subheading_style))
+                    
+                    subdomain_data = [['Subdomain', 'IP Address', 'Status', 'Discovery Method']]
+                    for subdomain in subdomains[:20]:  # Show first 20 subdomains
+                        subdomain_data.append([
+                            subdomain.get('subdomain', 'N/A'),
+                            subdomain.get('ip', 'N/A'),
+                            subdomain.get('status', 'Unknown'),
+                            subdomain.get('discovery_method', 'Unknown')
+                        ])
+                    
+                    if len(subdomains) > 20:
+                        subdomain_data.append(['...', f'and {len(subdomains) - 20} more subdomains', '...', '...'])
+                    
+                    subdomain_table = Table(subdomain_data, colWidths=[2.5*inch, 1.5*inch, 1*inch, 1.5*inch])
+                    subdomain_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 9),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.lightblue),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightblue]),
+                        ('FONTSIZE', (0, 1), (-1, -1), 8),
+                        ('WORDWRAP', (0, 0), (-1, -1), True),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 6)
+                    ]))
+                    story.append(subdomain_table)
+                    story.append(Spacer(1, 15))
+                    
+                    # Show detailed information for first few subdomains
+                    story.append(Paragraph("📋 DETAILED SUBDOMAIN ANALYSIS", subheading_style))
+                    for i, subdomain in enumerate(subdomains[:5], 1):  # Show details for first 5
+                        story.append(Paragraph(f"<b>{i}. {subdomain.get('subdomain', 'Unknown')}</b>", normal_style))
+                        
+                        # Basic info
+                        if subdomain.get('ip'):
+                            story.append(Paragraph(f"   IP Address: {subdomain['ip']}", normal_style))
+                        if subdomain.get('status'):
+                            story.append(Paragraph(f"   Status: {subdomain['status']}", normal_style))
+                        if subdomain.get('discovery_method'):
+                            story.append(Paragraph(f"   Discovery Method: {subdomain['discovery_method']}", normal_style))
+                        
+                        # DNS Records
+                        if subdomain.get('dns_records') and len(subdomain['dns_records']) > 0:
+                            story.append(Paragraph(f"   DNS Records: {len(subdomain['dns_records'])} records found", normal_style))
+                        
+                        # SSL Certificate info
+                        if subdomain.get('ssl_issuer') and subdomain['ssl_issuer'] != 'No SSL':
+                            story.append(Paragraph(f"   SSL Certificate: {subdomain['ssl_issuer']}", normal_style))
+                            if subdomain.get('ssl_expiry'):
+                                story.append(Paragraph(f"   SSL Expiry: {subdomain['ssl_expiry']}", normal_style))
+                        
+                        # Search engine data
+                        if subdomain.get('indexed'):
+                            story.append(Paragraph(f"   Search Engine Indexed: Yes", normal_style))
+                            if subdomain.get('page_rank'):
+                                story.append(Paragraph(f"   Page Rank: {subdomain['page_rank']}", normal_style))
+                        
+                        # VirusTotal reputation
+                        if subdomain.get('reputation_score'):
+                            story.append(Paragraph(f"   Reputation Score: {subdomain['reputation_score']}", normal_style))
+                        if subdomain.get('detections') and subdomain['detections'] > 0:
+                            story.append(Paragraph(f"   Security Detections: {subdomain['detections']}", normal_style))
+                        
+                        story.append(Spacer(1, 10))
+                    
+                    if len(subdomains) > 5:
+                        story.append(Paragraph(f"... and {len(subdomains) - 5} more subdomains with detailed analysis", normal_style))
+                        story.append(Spacer(1, 10))
+                else:
+                    story.append(Paragraph("No subdomains were discovered during the enumeration scan.", normal_style))
+                    story.append(Spacer(1, 10))
+            
+            elif 'whois' in scan_type:
+                story.append(Paragraph("📋 WHOIS LOOKUP RESULTS", subheading_style))
+                
+                if details.get('registrar'):
+                    story.append(Paragraph(f"<b>Registrar:</b> {details['registrar']}", normal_style))
+                if details.get('creation_date'):
+                    story.append(Paragraph(f"<b>Creation Date:</b> {details['creation_date']}", normal_style))
+                if details.get('expiration_date'):
+                    story.append(Paragraph(f"<b>Expiration Date:</b> {details['expiration_date']}", normal_style))
+                if details.get('updated_date'):
+                    story.append(Paragraph(f"<b>Last Updated:</b> {details['updated_date']}", normal_style))
+                if details.get('status'):
+                    story.append(Paragraph(f"<b>Domain Status:</b> {details['status']}", normal_style))
+                if details.get('name_servers'):
+                    story.append(Paragraph(f"<b>Name Servers:</b> {', '.join(details['name_servers'])}", normal_style))
+                story.append(Spacer(1, 15))
+            
+            elif 'dns' in scan_type:
+                story.append(Paragraph("🌐 DNS ENUMERATION RESULTS", subheading_style))
+                
+                # Display different DNS record types
+                record_types = ['a_records', 'aaaa_records', 'mx_records', 'ns_records', 'txt_records', 'cname_records']
+                record_names = ['A Records', 'AAAA Records', 'MX Records', 'NS Records', 'TXT Records', 'CNAME Records']
+                
+                for record_type, record_name in zip(record_types, record_names):
+                    if details.get(record_type) and len(details[record_type]) > 0:
+                        story.append(Paragraph(f"<b>{record_name}:</b>", normal_style))
+                        for record in details[record_type][:5]:  # Show first 5 records
+                            story.append(Paragraph(f"   {record}", normal_style))
+                        if len(details[record_type]) > 5:
+                            story.append(Paragraph(f"   ... and {len(details[record_type]) - 5} more", normal_style))
+                        story.append(Spacer(1, 5))
+                story.append(Spacer(1, 10))
+            
+            else:
+                # Generic scan details
+                story.append(Paragraph("📄 SCAN DETAILS", subheading_style))
+                story.append(Paragraph("Raw scan data:", normal_style))
+                
+                # Format JSON for better readability
+                try:
+                    formatted_json = json.dumps(details, indent=2)
+                    # Split long JSON into paragraphs
+                    lines = formatted_json.split('\n')
+                    for line in lines[:50]:  # Limit to first 50 lines
+                        story.append(Paragraph(f"<code>{line}</code>", normal_style))
+                    if len(lines) > 50:
+                        story.append(Paragraph(f"... and {len(lines) - 50} more lines", normal_style))
+                except:
+                    story.append(Paragraph("Unable to format scan details", normal_style))
+        
+        # Footer
+        story.append(Spacer(1, 30))
+        story.append(Paragraph("Generated by Pent-Framework Security Assessment Tool", 
+                              ParagraphStyle('Footer', fontSize=8, alignment=1, textColor=colors.grey)))
+        
+        # Build the PDF
+        doc.build(story)
+        
+        # Get the PDF content
+        pdf_content = buffer.getvalue()
+        buffer.close()
+        
+        return pdf_content
+        
+    except ImportError:
+        # Fallback if ReportLab is not available
+        return f"PDF generation requires ReportLab library. Report content: {report_data.get('title', 'Untitled')}"
+    except Exception as e:
+        return f"Error generating PDF: {str(e)}"
 
 @api_view(['GET'])
 def check_nmap_availability(request):
@@ -3032,3 +3968,308 @@ def get_service_name(port):
         return "Dynamic/Private service"
     else:
         return "Unknown"
+
+# Audit Logs API Endpoints
+@api_view(['GET'])
+def get_audit_logs(request):
+    """
+    Get audit logs with filtering and pagination
+    """
+    try:
+        # Get query parameters
+        page = int(request.GET.get('page', 1))
+        page_size = int(request.GET.get('page_size', 50))
+        search = request.GET.get('search', '')
+        module_filter = request.GET.get('module', '')
+        status_filter = request.GET.get('status', '')
+        user_filter = request.GET.get('user', '')
+        severity_filter = request.GET.get('severity', '')
+        start_date = request.GET.get('start_date', '')
+        end_date = request.GET.get('end_date', '')
+        
+        # Build query
+        queryset = AuditLog.objects.all()
+        
+        # Apply filters
+        if search:
+            queryset = queryset.filter(
+                Q(action__icontains=search) |
+                Q(user_email__icontains=search) |
+                Q(target__icontains=search) |
+                Q(details__icontains=search)
+            )
+        
+        if module_filter:
+            queryset = queryset.filter(module=module_filter)
+        
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        
+        if user_filter:
+            queryset = queryset.filter(user_email=user_filter)
+        
+        if severity_filter:
+            queryset = queryset.filter(severity=severity_filter)
+        
+        if start_date:
+            try:
+                start_datetime = timezone.datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                queryset = queryset.filter(timestamp__gte=start_datetime)
+            except ValueError:
+                pass
+        
+        if end_date:
+            try:
+                end_datetime = timezone.datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                queryset = queryset.filter(timestamp__lte=end_datetime)
+            except ValueError:
+                pass
+        
+        # Pagination
+        paginator = Paginator(queryset, page_size)
+        page_obj = paginator.get_page(page)
+        
+        # Prepare response data
+        logs_data = []
+        for log in page_obj:
+            logs_data.append({
+                'id': log.id,
+                'timestamp': log.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                'user': log.user_email or 'Unknown',
+                'action': log.action,
+                'target': log.target,
+                'module': log.module,
+                'status': log.status,
+                'severity': log.severity,
+                'ip': log.ip_address,
+                'details': log.details,
+                'user_agent': log.user_agent,
+                'metadata': log.metadata,
+            })
+        
+        # Get statistics
+        total_logs = queryset.count()
+        total_users = queryset.values('user_email').distinct().count()
+        failed_actions = queryset.filter(status='failed').count()
+        security_events = queryset.filter(
+            Q(module='authentication') | 
+            Q(status='failed') | 
+            Q(severity__in=['high', 'critical'])
+        ).count()
+        
+        response_data = {
+            'success': True,
+            'logs': logs_data,
+            'pagination': {
+                'current_page': page,
+                'total_pages': paginator.num_pages,
+                'total_count': total_logs,
+                'has_next': page_obj.has_next(),
+                'has_previous': page_obj.has_previous(),
+            },
+            'statistics': {
+                'total_actions': total_logs,
+                'failed_actions': failed_actions,
+                'active_users': total_users,
+                'security_events': security_events,
+            },
+            'filters': {
+                'available_modules': [choice[0] for choice in AuditLog.MODULE_CHOICES],
+                'available_statuses': [choice[0] for choice in AuditLog.STATUS_CHOICES],
+                'available_severities': [choice[0] for choice in AuditLog.SEVERITY_CHOICES],
+                'available_users': list(queryset.values_list('user_email', flat=True).distinct()),
+            }
+        }
+        
+        return Response(response_data)
+        
+    except Exception as e:
+        return Response({'success': False, 'error': str(e)}, status=500)
+
+@api_view(['GET'])
+def get_audit_statistics(request):
+    """
+    Get audit logs statistics and analytics
+    """
+    try:
+        # Get date range
+        days = int(request.GET.get('days', 30))
+        end_date = timezone.now()
+        start_date = end_date - timezone.timedelta(days=days)
+        
+        # Get logs in date range
+        logs = AuditLog.objects.filter(timestamp__range=[start_date, end_date])
+        
+        # Activity by module
+        module_stats = logs.values('module').annotate(count=Count('id')).order_by('-count')
+        
+        # Activity by status
+        status_stats = logs.values('status').annotate(count=Count('id')).order_by('-count')
+        
+        # Activity by severity
+        severity_stats = logs.values('severity').annotate(count=Count('id')).order_by('-count')
+        
+        # Activity by user
+        user_stats = logs.values('user_email').annotate(count=Count('id')).order_by('-count')[:10]
+        
+        # Daily activity
+        daily_stats = []
+        for i in range(days):
+            date = end_date - timezone.timedelta(days=i)
+            day_start = date.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = date.replace(hour=23, minute=59, second=59, microsecond=999999)
+            count = logs.filter(timestamp__range=[day_start, day_end]).count()
+            daily_stats.append({
+                'date': date.strftime('%Y-%m-%d'),
+                'count': count
+            })
+        daily_stats.reverse()
+        
+        # Top actions
+        top_actions = logs.values('action').annotate(count=Count('id')).order_by('-count')[:10]
+        
+        # Security events
+        security_events = logs.filter(
+            Q(module='authentication') | 
+            Q(status='failed') | 
+            Q(severity__in=['high', 'critical'])
+        ).count()
+        
+        response_data = {
+            'success': True,
+            'statistics': {
+                'total_events': logs.count(),
+                'security_events': security_events,
+                'unique_users': logs.values('user_email').distinct().count(),
+                'failed_actions': logs.filter(status='failed').count(),
+            },
+            'analytics': {
+                'module_stats': list(module_stats),
+                'status_stats': list(status_stats),
+                'severity_stats': list(severity_stats),
+                'user_stats': list(user_stats),
+                'daily_stats': daily_stats,
+                'top_actions': list(top_actions),
+            }
+        }
+        
+        return Response(response_data)
+        
+    except Exception as e:
+        return Response({'success': False, 'error': str(e)}, status=500)
+
+@api_view(['POST'])
+def export_audit_logs(request):
+    """
+    Export audit logs to CSV/JSON
+    """
+    try:
+        data = request.data
+        format_type = data.get('format', 'json')
+        filters = data.get('filters', {})
+        
+        # Apply filters
+        queryset = AuditLog.objects.all()
+        
+        if filters.get('search'):
+            queryset = queryset.filter(
+                Q(action__icontains=filters['search']) |
+                Q(user_email__icontains=filters['search']) |
+                Q(target__icontains=filters['search'])
+            )
+        
+        if filters.get('module'):
+            queryset = queryset.filter(module=filters['module'])
+        
+        if filters.get('status'):
+            queryset = queryset.filter(status=filters['status'])
+        
+        if filters.get('start_date'):
+            try:
+                start_datetime = timezone.datetime.strptime(filters['start_date'], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                queryset = queryset.filter(timestamp__gte=start_datetime)
+            except ValueError:
+                pass
+        
+        if filters.get('end_date'):
+            try:
+                end_datetime = timezone.datetime.strptime(filters['end_date'], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                queryset = queryset.filter(timestamp__lte=end_datetime)
+            except ValueError:
+                pass
+        
+        # Prepare data
+        logs_data = []
+        for log in queryset:
+            logs_data.append({
+                'timestamp': log.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                'user': log.user_email or 'Unknown',
+                'action': log.action,
+                'target': log.target,
+                'module': log.module,
+                'status': log.status,
+                'severity': log.severity,
+                'ip_address': log.ip_address,
+                'details': log.details,
+            })
+        
+        if format_type == 'csv':
+            import csv
+            import io
+            
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=[
+                'timestamp', 'user', 'action', 'target', 'module', 
+                'status', 'severity', 'ip_address', 'details'
+            ])
+            writer.writeheader()
+            writer.writerows(logs_data)
+            
+            from django.http import HttpResponse
+            response = HttpResponse(output.getvalue(), content_type='text/csv')
+            response['Content-Disposition'] = 'attachment; filename="audit_logs.csv"'
+            return response
+        
+        else:  # JSON
+            return Response({
+                'success': True,
+                'data': logs_data,
+                'count': len(logs_data)
+            })
+        
+    except Exception as e:
+        return Response({'success': False, 'error': str(e)}, status=500)
+
+@api_view(['POST'])
+def clear_audit_logs(request):
+    """
+    Clear audit logs (admin only)
+    """
+    try:
+        data = request.data
+        days_to_keep = data.get('days_to_keep', 90)
+        
+        # Calculate cutoff date
+        cutoff_date = timezone.now() - timezone.timedelta(days=days_to_keep)
+        
+        # Delete old logs
+        deleted_count = AuditLog.objects.filter(timestamp__lt=cutoff_date).delete()[0]
+        
+        # Log this action
+        log_audit_event(
+            request=request,
+            action="Audit logs cleared",
+            target=f"Logs older than {days_to_keep} days",
+            module="administration",
+            status="success",
+            details=f"Deleted {deleted_count} log entries"
+        )
+        
+        return Response({
+            'success': True,
+            'message': f'Successfully deleted {deleted_count} old audit log entries',
+            'deleted_count': deleted_count
+        })
+        
+    except Exception as e:
+        return Response({'success': False, 'error': str(e)}, status=500)

@@ -47,15 +47,22 @@ urlpatterns = [
     # Proactive Reporting System
     path('reports/individual/', views.get_individual_reports, name='get_individual_reports'),
     path('reports/comprehensive/', views.get_comprehensive_reports, name='get_comprehensive_reports'),
-    path('reports/individual/<str:report_id>/', views.get_individual_report_detail, name='get_individual_report_detail'),
-    path('reports/save-individual/', views.save_individual_report, name='save_individual_report'),
     path('reports/comprehensive/generate/', views.generate_comprehensive_report, name='generate_comprehensive_report'),
+    path('reports/save-individual/', views.save_individual_report, name='save_individual_report'),
     path('reports/<str:report_type>/<str:report_id>/download/', views.download_report_pdf, name='download_report_pdf'),
-    path('reports/<str:report_type>/<str:report_id>/', views.delete_report, name='delete_report'),
+    path('reports/<str:report_type>/<str:report_id>/delete/', views.delete_report, name='delete_report'),
+    path('reports/individual/<str:report_id>/', views.get_individual_report_detail, name='get_individual_report_detail'),
+    path('reports/comprehensive/<str:report_id>/', views.get_comprehensive_report_detail, name='get_comprehensive_report_detail'),
     
     # Nmap Detection
     path('scan/check-nmap/', views.check_nmap_availability, name='check_nmap_availability'),
     
     # Real Basic Port Scanner
     path('scan/basic-port-scan/', views.basic_port_scan, name='basic_port_scan'),
+    
+    # Audit Logs
+    path('audit-logs/', views.get_audit_logs, name='get_audit_logs'),
+    path('audit-logs/statistics/', views.get_audit_statistics, name='get_audit_statistics'),
+    path('audit-logs/export/', views.export_audit_logs, name='export_audit_logs'),
+    path('audit-logs/clear/', views.clear_audit_logs, name='clear_audit_logs'),
 ] 

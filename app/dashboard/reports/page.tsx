@@ -34,7 +34,9 @@ import {
   Plus,
   FileDown,
   CheckSquare,
-  Square
+  Square,
+  X,
+  RefreshCw
 } from "lucide-react"
 
 interface IndividualReport {
@@ -60,6 +62,264 @@ interface ComprehensiveReport {
   status: 'draft' | 'generated' | 'downloaded'
 }
 
+const renderScanResults = (details: any, scanType: string) => {
+  if (!details) return <p className="text-sm text-muted-foreground">No detailed results available</p>
+
+  switch (scanType) {
+    case 'port_scan':
+    case 'basic_port_scan':
+      return (
+        <div className="space-y-4">
+          {/* Port Scan Summary */}
+          {details.summary && (
+            <div className="bg-secondary/30 p-4 rounded-lg border border-border">
+              <h4 className="font-medium text-sm mb-2 text-card-foreground">Port Scan Summary</h4>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div>
+                  <span className="text-muted-foreground">Total Ports:</span>
+                  <span className="ml-2 font-medium text-card-foreground">{details.summary.total_ports}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Open:</span>
+                  <span className="ml-2 font-medium text-green-500">{details.summary.open_count}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Closed:</span>
+                  <span className="ml-2 font-medium text-red-500">{details.summary.closed_count}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Filtered:</span>
+                  <span className="ml-2 font-medium text-yellow-500">{details.summary.filtered_count}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Open Ports */}
+          {details.open_ports && details.open_ports.length > 0 && (
+            <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-lg border border-green-200 dark:border-green-800">
+              <h4 className="font-medium text-sm mb-3 flex items-center gap-2 text-black dark:text-white">
+                <CheckCircle className="h-4 w-4 text-green-500" />
+                Open Ports ({details.open_ports.length})
+              </h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                {details.open_ports.map((port: any, index: number) => (
+                  <div key={index} className="bg-white dark:bg-green-900/30 p-2 rounded border border-border">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-sm text-black dark:text-white">Port {port.port}</span>
+                      <Badge variant="outline" className="text-xs bg-background text-foreground border-border">
+                        {port.service}
+                      </Badge>
+                    </div>
+                    {port.response_time && port.response_time > 0 && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Response: {port.response_time}ms
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Closed Ports */}
+          {details.closed_ports && details.closed_ports.length > 0 && (
+            <div className="bg-red-50 dark:bg-red-900/20 p-4 rounded-lg border border-red-200 dark:border-red-800">
+              <h4 className="font-medium text-sm mb-3 flex items-center gap-2 text-black dark:text-white">
+                <XCircle className="h-4 w-4 text-red-500" />
+                Closed Ports ({details.closed_ports.length})
+              </h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                {details.closed_ports.slice(0, 20).map((port: any, index: number) => (
+                  <div key={index} className="bg-white dark:bg-red-900/30 p-2 rounded border border-border">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-sm text-black dark:text-white">Port {port.port}</span>
+                      <Badge variant="outline" className="text-xs bg-background text-foreground border-border">
+                        {port.service}
+                      </Badge>
+                    </div>
+                  </div>
+                ))}
+                {details.closed_ports.length > 20 && (
+                  <div className="col-span-full text-center text-sm text-muted-foreground">
+                    ... and {details.closed_ports.length - 20} more closed ports
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Filtered Ports */}
+          {details.filtered_ports && details.filtered_ports.length > 0 && (
+            <div className="bg-yellow-50 dark:bg-yellow-900/20 p-4 rounded-lg border border-yellow-200 dark:border-yellow-800">
+              <h4 className="font-medium text-sm mb-3 flex items-center gap-2 text-black dark:text-white">
+                <AlertTriangle className="h-4 w-4 text-yellow-500" />
+                Filtered Ports ({details.filtered_ports.length})
+              </h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                {details.filtered_ports.slice(0, 20).map((port: any, index: number) => (
+                  <div key={index} className="bg-white dark:bg-yellow-900/30 p-2 rounded border border-border">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-sm text-black dark:text-white">Port {port.port}</span>
+                      <Badge variant="outline" className="text-xs bg-background text-foreground border-border">
+                        {port.service}
+                      </Badge>
+                    </div>
+                  </div>
+                ))}
+                {details.filtered_ports.length > 20 && (
+                  <div className="col-span-full text-center text-sm text-muted-foreground">
+                    ... and {details.filtered_ports.length - 20} more filtered ports
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )
+
+    case 'vulnerability_scan':
+      return (
+        <div className="space-y-4">
+          {/* Vulnerability Summary */}
+          {details.summary && (
+            <div className="bg-secondary/30 p-4 rounded-lg border border-border">
+              <h4 className="font-medium text-sm mb-2 text-card-foreground">Vulnerability Summary</h4>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div>
+                  <span className="text-muted-foreground">Critical:</span>
+                  <span className="ml-2 font-medium text-red-500">{details.summary.critical_vulnerabilities || 0}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">High:</span>
+                  <span className="ml-2 font-medium text-orange-500">{details.summary.high_vulnerabilities || 0}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Medium:</span>
+                  <span className="ml-2 font-medium text-yellow-500">{details.summary.medium_vulnerabilities || 0}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Low:</span>
+                  <span className="ml-2 font-medium text-blue-500">{details.summary.low_vulnerabilities || 0}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Critical Vulnerabilities */}
+          {details.critical_vulnerabilities && details.critical_vulnerabilities.length > 0 && (
+            <div className="bg-red-50 dark:bg-red-900/20 p-4 rounded-lg border border-red-200 dark:border-red-800">
+              <h4 className="font-medium text-sm mb-3 flex items-center gap-2 text-card-foreground">
+                <AlertTriangle className="h-4 w-4 text-red-500" />
+                Critical Vulnerabilities ({details.critical_vulnerabilities.length})
+              </h4>
+              <div className="space-y-3">
+                {details.critical_vulnerabilities.map((vuln: any, index: number) => (
+                  <div key={index} className="bg-white dark:bg-red-900/30 p-3 rounded border border-border">
+                    <h5 className="font-medium text-sm mb-1 text-card-foreground">{vuln.name || `Vulnerability ${index + 1}`}</h5>
+                    <p className="text-xs text-muted-foreground mb-2">{vuln.description || 'No description available'}</p>
+                    {vuln.cwe && (
+                      <Badge variant="outline" className="text-xs mr-2">CWE: {vuln.cwe}</Badge>
+                    )}
+                    {vuln.cvss && (
+                      <Badge variant="outline" className="text-xs">CVSS: {vuln.cvss}</Badge>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* High Vulnerabilities */}
+          {details.high_vulnerabilities && details.high_vulnerabilities.length > 0 && (
+            <div className="bg-orange-50 dark:bg-orange-900/20 p-4 rounded-lg border border-orange-200 dark:border-orange-800">
+              <h4 className="font-medium text-sm mb-3 flex items-center gap-2 text-card-foreground">
+                <AlertTriangle className="h-4 w-4 text-orange-500" />
+                High Vulnerabilities ({details.high_vulnerabilities.length})
+              </h4>
+              <div className="space-y-3">
+                {details.high_vulnerabilities.slice(0, 10).map((vuln: any, index: number) => (
+                  <div key={index} className="bg-white dark:bg-orange-900/30 p-3 rounded border border-border">
+                    <h5 className="font-medium text-sm mb-1 text-card-foreground">{vuln.name || `Vulnerability ${index + 1}`}</h5>
+                    <p className="text-xs text-muted-foreground mb-2">{vuln.description || 'No description available'}</p>
+                    {vuln.cwe && (
+                      <Badge variant="outline" className="text-xs mr-2">CWE: {vuln.cwe}</Badge>
+                    )}
+                    {vuln.cvss && (
+                      <Badge variant="outline" className="text-xs">CVSS: {vuln.cvss}</Badge>
+                    )}
+                  </div>
+                ))}
+                {details.high_vulnerabilities.length > 10 && (
+                  <div className="text-center text-sm text-muted-foreground">
+                    ... and {details.high_vulnerabilities.length - 10} more high vulnerabilities
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )
+
+    case 'whois':
+      return (
+        <div className="bg-secondary/30 p-4 rounded-lg border border-border">
+          <h4 className="font-medium text-sm mb-3 text-card-foreground">WHOIS Information</h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+            {Object.entries(details).map(([key, value]) => (
+              <div key={key}>
+                <span className="text-muted-foreground capitalize">{key.replace(/_/g, ' ')}:</span>
+                <span className="ml-2 font-medium text-card-foreground">{String(value)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )
+
+    case 'dns':
+      return (
+        <div className="space-y-4">
+          {Object.entries(details).map(([recordType, records]) => (
+            <div key={recordType} className="bg-secondary/30 p-4 rounded-lg border border-border">
+              <h4 className="font-medium text-sm mb-3 capitalize text-card-foreground">{recordType.replace(/_/g, ' ')} Records</h4>
+              <div className="space-y-2">
+                {Array.isArray(records) && records.map((record: any, index: number) => (
+                  <div key={index} className="bg-white dark:bg-secondary p-2 rounded border border-border">
+                    <span className="text-sm font-medium text-card-foreground">{record}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )
+
+    case 'subdomain':
+      return (
+        <div className="bg-secondary/30 p-4 rounded-lg border border-border">
+          <h4 className="font-medium text-sm mb-3 text-card-foreground">Discovered Subdomains</h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+            {details.subdomains && details.subdomains.map((subdomain: string, index: number) => (
+              <div key={index} className="bg-white dark:bg-secondary p-2 rounded border border-border">
+                <span className="text-sm font-medium text-card-foreground">{subdomain}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )
+
+    default:
+      return (
+        <div className="bg-secondary/30 p-4 rounded-lg border border-border">
+          <h4 className="font-medium text-sm mb-3 text-card-foreground">Raw Scan Data</h4>
+          <pre className="text-xs bg-secondary p-3 rounded overflow-auto max-h-60 border border-border">
+            {JSON.stringify(details, null, 2)}
+          </pre>
+        </div>
+      )
+  }
+}
+
 export default function ReportsPage() {
   const [individualReports, setIndividualReports] = useState<IndividualReport[]>([])
   const [comprehensiveReports, setComprehensiveReports] = useState<ComprehensiveReport[]>([])
@@ -69,7 +329,7 @@ export default function ReportsPage() {
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState("")
   const [success, setSuccess] = useState("")
-  const [selectedReportDetail, setSelectedReportDetail] = useState<IndividualReport | null>(null)
+  const [selectedReportDetail, setSelectedReportDetail] = useState<IndividualReport | ComprehensiveReport | null>(null)
 
   // Fetch reports on component mount
   useEffect(() => {
@@ -80,11 +340,18 @@ export default function ReportsPage() {
   const fetchIndividualReports = async () => {
     try {
       setLoading(true)
+      console.log('Fetching individual reports...')
       const response = await fetch('/api/reports/individual')
       const data = await response.json()
       
+      console.log('Individual reports response:', data)
+      
       if (data.success) {
         setIndividualReports(data.reports)
+        console.log('Set individual reports:', data.reports)
+      } else {
+        console.error('Failed to fetch reports:', data.error)
+        setError(data.error || 'Failed to fetch individual reports')
       }
     } catch (error) {
       console.error('Error fetching individual reports:', error)
@@ -169,7 +436,7 @@ export default function ReportsPage() {
 
   const handleDownloadPDF = async (reportId: string, reportType: 'individual' | 'comprehensive') => {
     try {
-      const response = await fetch(`/api/reports/${reportType}/${reportId}/download`, {
+      const response = await fetch(`/api/reports/download-pdf/${reportType}/${reportId}`, {
         method: 'POST'
       })
       
@@ -196,7 +463,7 @@ export default function ReportsPage() {
 
   const handleViewReportDetail = async (reportId: string) => {
     try {
-      const response = await fetch(`/api/reports/individual/${reportId}`)
+      const response = await fetch(`/api/reports/individual/detail/${reportId}`)
       const data = await response.json()
       
       if (data.success) {
@@ -210,13 +477,35 @@ export default function ReportsPage() {
     }
   }
 
+  const handleViewComprehensiveReportDetail = async (reportId: string) => {
+    try {
+      const response = await fetch(`/api/reports/comprehensive/detail/${reportId}`)
+      const data = await response.json()
+      
+      if (data.success) {
+        setSelectedReportDetail(data.report)
+      } else {
+        // If report not found, refresh the comprehensive reports list
+        if (data.error && data.error.includes('not found')) {
+          setError('Report not found. Refreshing reports list...')
+          fetchComprehensiveReports()
+        } else {
+          setError('Failed to load comprehensive report details')
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching comprehensive report details:', error)
+      setError('Failed to load comprehensive report details')
+    }
+  }
+
   const handleDeleteReport = async (reportId: string, reportType: 'individual' | 'comprehensive') => {
     if (!confirm(`Are you sure you want to delete this ${reportType} report?`)) {
       return
     }
 
     try {
-      const response = await fetch(`/api/reports/${reportType}/${reportId}`, {
+      const response = await fetch(`/api/reports/delete/${reportType}/${reportId}`, {
         method: 'DELETE'
       })
       
@@ -273,6 +562,8 @@ export default function ReportsPage() {
   }
 
   const getScanTypeName = (type: string) => {
+    if (!type) return 'Unknown Scan Type'
+
     switch (type) {
       case 'whois':
         return 'WHOIS Lookup'
@@ -297,6 +588,11 @@ export default function ReportsPage() {
 
   const formatTime = (dateString: string) => {
     return new Date(dateString).toLocaleTimeString()
+  }
+
+  // Type guard to check if report is individual
+  const isIndividualReport = (report: IndividualReport | ComprehensiveReport): report is IndividualReport => {
+    return 'scan_type' in report && 'target' in report
   }
 
   return (
@@ -328,17 +624,17 @@ export default function ReportsPage() {
         </TabsList>
 
         <TabsContent value="individual" className="space-y-4">
-          <Card>
-            <CardHeader>
+              <Card>
+                <CardHeader>
               <div className="flex items-center justify-between">
                 <div>
                   <CardTitle className="text-lg sm:text-xl">Individual Scan Reports</CardTitle>
                   <CardDescription className="text-sm">
                     Individual reports from reconnaissance, scanning, and exploitation activities
                   </CardDescription>
-                </div>
+                    </div>
                 <Badge className="bg-blue-600">{individualReports.length} reports</Badge>
-              </div>
+                    </div>
             </CardHeader>
             <CardContent>
               {loading ? (
@@ -362,32 +658,32 @@ export default function ReportsPage() {
                           <div>
                             <h3 className="text-foreground font-medium">{report.title}</h3>
                             <p className="text-muted-foreground text-sm">{getScanTypeName(report.scan_type)}</p>
-                          </div>
-                        </div>
+                      </div>
+                            </div>
                         <div className="flex items-center gap-2">
                           <Badge className={getSeverityColor(report.severity)}>{report.severity}</Badge>
                           <Badge variant="outline">{report.findings_count} findings</Badge>
-                        </div>
-                      </div>
-
+                                </div>
+                                </div>
+                      
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
                         <div className="flex items-center space-x-2">
                           <Target className="h-3 w-3 sm:h-4 sm:w-4 text-muted-foreground" />
                           <span className="text-foreground text-xs sm:text-sm truncate">{report.target}</span>
-                        </div>
+                                </div>
                         <div className="flex items-center space-x-2">
                           <Calendar className="h-3 w-3 sm:h-4 sm:w-4 text-muted-foreground" />
                           <span className="text-foreground text-xs sm:text-sm">{formatDate(report.timestamp)}</span>
-                        </div>
+                                </div>
                         <div className="flex items-center space-x-2">
                           <Activity className="h-3 w-3 sm:h-4 sm:w-4 text-muted-foreground" />
                           <span className="text-foreground text-xs sm:text-sm">{formatTime(report.timestamp)}</span>
-                        </div>
+                                </div>
                         <div className="flex items-center space-x-2">
                           <FileText className="h-3 w-3 sm:h-4 sm:w-4 text-muted-foreground" />
                           <span className="text-foreground text-xs sm:text-sm">{report.status}</span>
-                        </div>
-                      </div>
+                              </div>
+                              </div>
 
                       <p className="text-sm text-muted-foreground mb-3">{report.summary}</p>
 
@@ -432,11 +728,22 @@ export default function ReportsPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <CardTitle className="text-lg sm:text-xl">Comprehensive Reports</CardTitle>
-                  <CardDescription className="text-sm">
+              <CardDescription className="text-sm">
                     Comprehensive security assessment reports combining multiple individual reports
-                  </CardDescription>
+              </CardDescription>
                 </div>
-                <Badge className="bg-green-600">{comprehensiveReports.length} reports</Badge>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={fetchComprehensiveReports}
+                    className="text-xs"
+                  >
+                    <RefreshCw className="h-3 w-3 mr-1" />
+                    Refresh
+                  </Button>
+                  <Badge className="bg-green-600">{comprehensiveReports.length} reports</Badge>
+                </div>
               </div>
             </CardHeader>
             <CardContent>
@@ -468,6 +775,7 @@ export default function ReportsPage() {
                         <Button
                           size="sm"
                           variant="outline"
+                          onClick={() => handleViewComprehensiveReportDetail(report.id)}
                         >
                           <Eye className="h-3 w-3 sm:h-4 sm:w-4 mr-1" />
                           View Details
@@ -499,13 +807,13 @@ export default function ReportsPage() {
         </TabsContent>
 
         <TabsContent value="generate" className="space-y-4">
-          <Card>
-            <CardHeader>
+            <Card>
+              <CardHeader>
               <CardTitle className="text-lg sm:text-xl">Generate Comprehensive Report</CardTitle>
-              <CardDescription className="text-sm">
+                <CardDescription className="text-sm">
                 Select individual reports to combine into a comprehensive security assessment
-              </CardDescription>
-            </CardHeader>
+                </CardDescription>
+              </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="report-title" className="text-foreground text-sm">
@@ -518,7 +826,7 @@ export default function ReportsPage() {
                   placeholder="Comprehensive Security Assessment Report"
                   className="bg-secondary border-border text-foreground"
                 />
-              </div>
+                    </div>
 
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
@@ -540,14 +848,14 @@ export default function ReportsPage() {
                       </>
                     )}
                   </Button>
-                </div>
+                  </div>
 
                 {individualReports.length === 0 ? (
                   <div className="text-center py-8">
                     <FileText className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                     <p className="text-muted-foreground">No individual reports available</p>
                     <p className="text-sm text-muted-foreground">Complete scans and exploits to generate individual reports first</p>
-                  </div>
+                        </div>
                 ) : (
                   <div className="space-y-2 max-h-96 overflow-y-auto">
                     {individualReports.map((report) => (
@@ -562,24 +870,35 @@ export default function ReportsPage() {
                             {getScanTypeIcon(report.scan_type)}
                             <span className="font-medium text-sm">{report.title}</span>
                             <Badge className={getSeverityColor(report.severity)}>{report.severity}</Badge>
-                          </div>
+                        </div>
                           <p className="text-xs text-muted-foreground">{report.target} • {getScanTypeName(report.scan_type)}</p>
                         </div>
                         <Badge variant="outline">{report.findings_count} findings</Badge>
                       </div>
-                    ))}
-                  </div>
-                )}
+                        ))}
+                          </div>
+                        )}
               </div>
 
-              <Button
-                onClick={handleGenerateComprehensiveReport}
-                disabled={selectedReports.length === 0 || !comprehensiveReportTitle.trim() || generating}
-                className="w-full bg-green-600 hover:bg-green-700"
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                {generating ? 'Generating...' : 'Generate Comprehensive Report'}
-              </Button>
+                      <div className="space-y-2">
+                <Button
+                  onClick={handleGenerateComprehensiveReport}
+                  disabled={selectedReports.length === 0 || !comprehensiveReportTitle.trim() || generating}
+                  className="w-full bg-green-600 hover:bg-green-700"
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  {generating ? 'Generating...' : 'Generate Comprehensive Report'}
+                </Button>
+                
+                {/* Debug info to help identify why button is disabled */}
+                <div className="text-xs text-muted-foreground space-y-1">
+                  <div>Available reports: {individualReports.length}</div>
+                  <div>Selected reports: {selectedReports.length}</div>
+                  <div>Title entered: {comprehensiveReportTitle ? 'Yes' : 'No'}</div>
+                  <div>Currently generating: {generating ? 'Yes' : 'No'}</div>
+                  <div>Button disabled: {selectedReports.length === 0 || !comprehensiveReportTitle.trim() || generating ? 'Yes' : 'No'}</div>
+                          </div>
+                          </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -587,50 +906,177 @@ export default function ReportsPage() {
 
       {/* Report Detail Modal */}
       {selectedReportDetail && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg sm:text-xl">Report Details: {selectedReportDetail.title}</CardTitle>
-            <CardDescription className="text-sm">
-              {getScanTypeName(selectedReportDetail.scan_type)} on {selectedReportDetail.target}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="bg-background p-4 sm:p-6 rounded-lg text-foreground overflow-auto max-h-96">
-              <div className="space-y-4">
-                <section>
-                  <h3 className="text-base font-semibold text-foreground mb-2">Summary</h3>
-                  <p className="text-sm text-muted-foreground">{selectedReportDetail.summary}</p>
-                </section>
-
-                <section>
-                  <h3 className="text-base font-semibold text-foreground mb-2">Details</h3>
-                  <pre className="text-xs bg-secondary p-3 rounded overflow-auto">
-                    {JSON.stringify(selectedReportDetail.details, null, 2)}
-                  </pre>
-                </section>
-
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    className="bg-blue-600 hover:bg-blue-700"
-                    onClick={() => handleDownloadPDF(selectedReportDetail.id, 'individual')}
-                  >
-                    <FileDown className="h-3 w-3 sm:h-4 sm:w-4 mr-1" />
-                    Download PDF
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setSelectedReportDetail(null)}
-                  >
-                    Close
-                  </Button>
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <Card className="w-full max-w-4xl max-h-[90vh] overflow-hidden bg-card border-border">
+            <CardHeader className="border-b border-border bg-card">
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="text-lg sm:text-xl flex items-center gap-2 text-card-foreground">
+                    {isIndividualReport(selectedReportDetail) ? getScanTypeIcon(selectedReportDetail.scan_type) : <FileText className="h-4 w-4" />}
+                    {selectedReportDetail.title}
+                  </CardTitle>
+                  <CardDescription className="text-sm text-muted-foreground">
+                    {isIndividualReport(selectedReportDetail) ? 
+                      `${getScanTypeName(selectedReportDetail.scan_type)} on ${selectedReportDetail.target}` :
+                      `Comprehensive Report - Generated on ${formatDate(selectedReportDetail.generated_at)}`
+                    }
+                  </CardDescription>
                 </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedReportDetail(null)}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            </CardHeader>
+            
+            <CardContent className="p-0 bg-card">
+              <div className="overflow-y-auto max-h-[calc(90vh-120px)]">
+                <div className="p-6 space-y-6">
+                  {/* Report Overview */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {isIndividualReport(selectedReportDetail) ? (
+                      <>
+                        <div className="bg-secondary/50 p-4 rounded-lg border border-border">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Target className="h-4 w-4 text-blue-500" />
+                            <span className="font-medium text-sm text-card-foreground">Target</span>
+                          </div>
+                          <p className="text-sm text-muted-foreground">{selectedReportDetail.target}</p>
+                        </div>
+                        
+                        <div className="bg-secondary/50 p-4 rounded-lg border border-border">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Calendar className="h-4 w-4 text-green-500" />
+                            <span className="font-medium text-sm text-card-foreground">Scan Date</span>
+                          </div>
+                          <p className="text-sm text-muted-foreground">{formatDate(selectedReportDetail.timestamp)}</p>
+                        </div>
+                        
+                        <div className="bg-secondary/50 p-4 rounded-lg border border-border">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Badge className={getSeverityColor(selectedReportDetail.severity)}>
+                              {selectedReportDetail.severity}
+                            </Badge>
+                            <span className="font-medium text-sm text-card-foreground">Severity</span>
+                          </div>
+                          <p className="text-sm text-muted-foreground">{selectedReportDetail.findings_count} findings</p>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="bg-secondary/50 p-4 rounded-lg border border-border">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Calendar className="h-4 w-4 text-green-500" />
+                            <span className="font-medium text-sm text-card-foreground">Generated Date</span>
+                          </div>
+                          <p className="text-sm text-muted-foreground">{formatDate(selectedReportDetail.generated_at)}</p>
+                        </div>
+                        
+                        <div className="bg-secondary/50 p-4 rounded-lg border border-border">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Badge className={getSeverityColor(selectedReportDetail.overall_severity)}>
+                              {selectedReportDetail.overall_severity}
+                            </Badge>
+                            <span className="font-medium text-sm text-card-foreground">Overall Severity</span>
+                          </div>
+                          <p className="text-sm text-muted-foreground">{selectedReportDetail.total_findings} findings</p>
+                        </div>
+                        
+                        <div className="bg-secondary/50 p-4 rounded-lg border border-border">
+                          <div className="flex items-center gap-2 mb-2">
+                            <FileText className="h-4 w-4 text-blue-500" />
+                            <span className="font-medium text-sm text-card-foreground">Included Reports</span>
+                          </div>
+                          <p className="text-sm text-muted-foreground">{selectedReportDetail.included_reports.length} reports</p>
+                        </div>
+                      </>
+                        )}
+                      </div>
+
+                  {/* Summary Section */}
+                  {isIndividualReport(selectedReportDetail) ? (
+                    <>
+                      {/* Scan Summary */}
+                      <div className="bg-secondary/30 p-4 rounded-lg border border-border">
+                        <h3 className="text-base font-semibold text-card-foreground mb-3 flex items-center gap-2">
+                          <Info className="h-4 w-4 text-blue-500" />
+                          Scan Summary
+                        </h3>
+                        <p className="text-sm text-muted-foreground leading-relaxed">
+                          {selectedReportDetail.summary}
+                        </p>
+                      </div>
+
+                      {/* Scan Results */}
+                      <div className="space-y-4">
+                        <h3 className="text-base font-semibold text-card-foreground flex items-center gap-2">
+                          <Activity className="h-4 w-4 text-green-500" />
+                          Scan Results
+                        </h3>
+                        
+                        {renderScanResults(selectedReportDetail.details, selectedReportDetail.scan_type)}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      {/* Comprehensive Report Summary */}
+                      <div className="bg-secondary/30 p-4 rounded-lg border border-border">
+                        <h3 className="text-base font-semibold text-card-foreground mb-3 flex items-center gap-2">
+                          <Info className="h-4 w-4 text-blue-500" />
+                          Comprehensive Report Summary
+                        </h3>
+                        <p className="text-sm text-muted-foreground leading-relaxed">
+                          This comprehensive report combines {selectedReportDetail.included_reports.length} individual reports with a total of {selectedReportDetail.total_findings} findings.
+                        </p>
+                      </div>
+
+                      {/* Included Reports */}
+                      <div className="space-y-4">
+                        <h3 className="text-base font-semibold text-card-foreground flex items-center gap-2">
+                          <FileText className="h-4 w-4 text-green-500" />
+                          Included Reports
+                        </h3>
+                        
+                        <div className="space-y-2">
+                          {selectedReportDetail.included_reports.map((reportId, index) => (
+                            <div key={index} className="p-3 bg-secondary/50 rounded-lg border border-border">
+                              <p className="text-sm text-muted-foreground">Report ID: {reportId}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                  </div>
+                </div>
+              </CardContent>
+            
+            <div className="border-t border-border p-4 bg-secondary/20">
+              <div className="flex gap-2 justify-end">
+                <Button
+                  size="sm"
+                  className="bg-blue-600 hover:bg-blue-700"
+                  onClick={() => handleDownloadPDF(selectedReportDetail.id, isIndividualReport(selectedReportDetail) ? 'individual' : 'comprehensive')}
+                >
+                  <FileDown className="h-4 w-4 mr-2" />
+                  Download PDF
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setSelectedReportDetail(null)}
+                >
+                  Close
+                </Button>
               </div>
             </div>
-          </CardContent>
-        </Card>
-      )}
+            </Card>
+        </div>
+          )}
     </div>
   )
 }

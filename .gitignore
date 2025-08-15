@@ -25,3 +25,22 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Ignore Python virtual environment
+backend/venv/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore database files if any
+*.sqlite3
+
+# Ignore logs and temp files
+*.log
+tmp/
+
+# Ignore OS generated files
+.DS_Store
+Thumbs.db
